@@ -71,7 +71,7 @@ Follow these steps to set up and run the web app locally:
 4. **Run the Web App**:
    Launch the Streamlit app with:
    ```bash
-   streamlit run rag_agent_system_streamlit.py
+   streamlit run main_rag_agent.py
    ```
    - Open your browser and navigate to `http://localhost:8501`.
 
