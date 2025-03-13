@@ -1,0 +1,12 @@
+langchain==0.3.20
+langchain_community==0.3.19
+langchain_core==0.3.44
+langchain_openai==0.3.8
+langgraph==0.3.8
+markdownify==1.1.0
+matplotlib==3.10.1
+networkx==3.4.2
+pandas==2.2.3
+PyPDF2==3.0.1
+python-dotenv==1.0.1
+streamlit==1.43.2
