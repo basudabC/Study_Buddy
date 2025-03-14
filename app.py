@@ -1,5 +1,11 @@
 import os
 import streamlit as st
+
+# Override sqlite3 with pysqlite3 before importing Chroma
+import pysqlite3
+import sys
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+
 from typing import TypedDict, Annotated, Literal
 import PyPDF2
 from markdownify import markdownify as md
@@ -15,10 +21,6 @@ import io
 import base64
 import random
 import pandas as pd
-from dotenv import load_dotenv
-
-# Load API key from .env file
-load_dotenv()
 
 # Step 1: PDF to Markdown Conversion
 def pdf_to_markdown(file_path):
@@ -55,7 +57,7 @@ class AgentState(TypedDict):
 
 # Global tools
 llm = None
-search_tool = TavilySearchResults(max_results=5)  # Will use TAVILY_API_KEY from env
+search_tool = TavilySearchResults(max_results=5)  # Uses TAVILY_API_KEY from env
 
 def initialize_llm():
     global llm
