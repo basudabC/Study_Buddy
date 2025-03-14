@@ -15,45 +15,6 @@ import io
 import base64
 import random
 import pandas as pd
-from dotenv import load_dotenv
-
-# Load API key from .env file
-load_dotenv()
-
-# Load environment variables
-# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-# if not OPENAI_API_KEY or not TAVILY_API_KEY:
-#     st.error("Please set OPENAI_API_KEY and TAVILY_API_KEY in your environment.")
-#     st.stop()
-
-# Try to get API keys from environment variables
-# Initialize session state for keys if not already set
-if 'OPENAI_API_KEY' not in st.session_state:
-    st.session_state['OPENAI_API_KEY'] = os.getenv("OPENAI_API_KEY")
-if 'TAVILY_API_KEY' not in st.session_state:
-    st.session_state['TAVILY_API_KEY'] = os.getenv("TAVILY_API_KEY")
-
-# Check if keys are missing
-if not st.session_state['OPENAI_API_KEY'] or not st.session_state['TAVILY_API_KEY']:
-    st.warning("API keys not found in environment variables. Please enter them below to continue.")
-
-    # Input fields for API keys
-    openai_key_input = st.text_input("Enter your OpenAI API Key", type="password")
-    tavily_key_input = st.text_input("Enter your Tavily API Key", type="password")
-
-    # Update session state if keys are provided
-    if openai_key_input and tavily_key_input:
-        st.session_state['OPENAI_API_KEY'] = openai_key_input
-        st.session_state['TAVILY_API_KEY'] = tavily_key_input
-        st.success("API keys set successfully!")
-    else:
-        st.info("Please provide both API keys to proceed.")
-        st.stop()
-
-# Use the keys from session state
-OPENAI_API_KEY = st.session_state['OPENAI_API_KEY']
-TAVILY_API_KEY = st.session_state['TAVILY_API_KEY']
 
 # Step 1: PDF to Markdown Conversion
 def pdf_to_markdown(file_path):
@@ -68,7 +29,10 @@ def pdf_to_markdown(file_path):
     return markdown_text
 
 def create_vector_store(markdown_text):
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=st.session_state.openai_api_key
+    )
     vector_store = Chroma.from_texts(
         [markdown_text], embeddings, collection_name="book_content", persist_directory="book_db"
     )
@@ -84,9 +48,6 @@ class AgentState(TypedDict):
     needs_web_search: Annotated[bool, "Whether web search is needed"]
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question for visualization"]
-
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.5)
-search_tool = TavilySearchResults(max_results=5)
 
 def retrieve_from_book(state: AgentState) -> dict:
     question = state["messages"][-1].content
@@ -150,7 +111,6 @@ def generate_visualization(topic):
     topic = topic.lower()
 
     if "photosynthesis" in topic:
-        # Flowchart for photosynthesis
         G = nx.DiGraph()
         G.add_node("Sunlight", pos=(0, 2))
         G.add_node("Water", pos=(-1, 1))
@@ -175,7 +135,6 @@ def generate_visualization(topic):
         img_base64 = base64.b64encode(buf.read()).decode("utf-8")
         plt.close()
 
-        # Add tabular data
         table_data = {
             "Input": ["Sunlight", "Water", "CO2"],
             "Output": ["Glucose", "Oxygen", "N/A"]
@@ -183,7 +142,6 @@ def generate_visualization(topic):
         df = pd.DataFrame(table_data)
         return img_base64, df
     elif "deep learning" in topic:
-        # Simplified neural network diagram
         G = nx.DiGraph()
         layers = ["Input Layer", "Hidden Layer 1", "Hidden Layer 2", "Output Layer"]
         for i, layer in enumerate(layers):
@@ -202,7 +160,6 @@ def generate_visualization(topic):
         img_base64 = base64.b64encode(buf.read()).decode("utf-8")
         plt.close()
 
-        # Add tabular data
         table_data = {
             "Layer": ["Input", "Hidden 1", "Hidden 2", "Output"],
             "Function": ["Receives data", "Learns patterns", "Refines patterns", "Gives result"]
@@ -210,7 +167,6 @@ def generate_visualization(topic):
         df = pd.DataFrame(table_data)
         return img_base64, df
     else:
-        # Concept map for general topics
         G = nx.DiGraph()
         G.add_node(topic.capitalize(), pos=(0, 0))
         G.add_node("Concept 1", pos=(-1, 1))
@@ -319,6 +275,42 @@ def main():
     st.markdown(f"<style>.stApp {{background-image: url({backgrounds[st.session_state.bg_index]});}}</style>", unsafe_allow_html=True)
 
     st.title("Your Study Buddy 📚")
+    
+    # Add API key input fields
+    if "openai_api_key" not in st.session_state:
+        st.session_state.openai_api_key = ""
+    if "tavily_api_key" not in st.session_state:
+        st.session_state.tavily_api_key = ""
+
+    with st.sidebar:
+        st.header("API Keys")
+        st.session_state.openai_api_key = st.text_input(
+            "OpenAI API Key",
+            value=st.session_state.openai_api_key,  # Fixed typo here
+            type="password"
+        )
+        st.session_state.tavily_api_key = st.text_input(
+            "Tavily API Key",
+            value=st.session_state.tavily_api_key,
+            type="password"
+        )
+        
+        if not st.session_state.openai_api_key or not st.session_state.tavily_api_key:
+            st.warning("Please enter both API keys to proceed!")
+            return
+
+    # Initialize LLM and search tool with user-provided API keys
+    global llm, search_tool
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.5,
+        api_key=st.session_state.openai_api_key
+    )
+    search_tool = TavilySearchResults(
+        max_results=5,
+        api_key=st.session_state.tavily_api_key
+    )
+
     st.write("Upload a book and chat with me! I’ll explain things with visuals and fun facts!")
 
     if "retriever" not in st.session_state:
@@ -330,7 +322,6 @@ def main():
     if "current_question" not in st.session_state:
         st.session_state.current_question = None
 
-    # Clear Chat Button
     if st.button("Clear Chat"):
         st.session_state.chat_history = []
         st.session_state.pending_web_search = None
@@ -348,7 +339,6 @@ def main():
         os.remove("temp_book.pdf")
 
     if st.session_state.retriever is not None:
-        # Chat container
         with st.container():
             st.markdown('<div class="chat-container">', unsafe_allow_html=True)
             for message in st.session_state.chat_history:
