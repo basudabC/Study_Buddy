@@ -28,25 +28,32 @@ load_dotenv()
 #     st.stop()
 
 # Try to get API keys from environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+# Initialize session state for keys if not already set
+if 'OPENAI_API_KEY' not in st.session_state:
+    st.session_state['OPENAI_API_KEY'] = os.getenv("OPENAI_API_KEY")
+if 'TAVILY_API_KEY' not in st.session_state:
+    st.session_state['TAVILY_API_KEY'] = os.getenv("TAVILY_API_KEY")
 
 # Check if keys are missing
-if not OPENAI_API_KEY or not TAVILY_API_KEY:
+if not st.session_state['OPENAI_API_KEY'] or not st.session_state['TAVILY_API_KEY']:
     st.warning("API keys not found in environment variables. Please enter them below to continue.")
 
     # Input fields for API keys
     openai_key_input = st.text_input("Enter your OpenAI API Key", type="password")
     tavily_key_input = st.text_input("Enter your Tavily API Key", type="password")
 
-    # Update the keys if provided by the user
+    # Update session state if keys are provided
     if openai_key_input and tavily_key_input:
-        OPENAI_API_KEY = openai_key_input
-        TAVILY_API_KEY = tavily_key_input
+        st.session_state['OPENAI_API_KEY'] = openai_key_input
+        st.session_state['TAVILY_API_KEY'] = tavily_key_input
         st.success("API keys set successfully!")
     else:
         st.info("Please provide both API keys to proceed.")
         st.stop()
+
+# Use the keys from session state
+OPENAI_API_KEY = st.session_state['OPENAI_API_KEY']
+TAVILY_API_KEY = st.session_state['TAVILY_API_KEY']
 
 # Step 1: PDF to Markdown Conversion
 def pdf_to_markdown(file_path):
