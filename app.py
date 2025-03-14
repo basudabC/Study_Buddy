@@ -56,7 +56,7 @@ class AgentState(TypedDict):
     current_question: Annotated[str, "Current question for visualization"]
 
 # Global tools
-search_tool = TavilySearchResults(max_results=5)  # Uses TAVILY_API_KEY from env
+search_tool = TavilySearchResults(max_results=3)  # Reduced from 5 to limit tokens
 
 def initialize_llm():
     return ChatOpenAI(
@@ -75,8 +75,9 @@ def retrieve_from_book(state: AgentState) -> dict:
 def simplify_book_answer(state: AgentState, llm) -> dict:
     question = state["messages"][-1].content
     context = state["book_context"]
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"]])
-    prompt = f"""Here’s the chat history so far:
+    # Limit chat history to last 5 messages to reduce tokens
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-5:]])
+    prompt = f"""Here’s the recent chat history:
     {history}
 
     Answer this question using the Markdown-formatted book content: {question}
@@ -91,21 +92,23 @@ def simplify_book_answer(state: AgentState, llm) -> dict:
 def web_search(state: AgentState) -> dict:
     question = state["current_question"]
     results = search_tool.invoke({"query": f"{question} detailed explanation for beginners"})
-    context = "\n".join(result["content"] for result in results)
+    # Limit web context to first 1000 characters per result to reduce tokens
+    context = "\n".join(result["content"][:1000] for result in results)
     return {"web_context": context}
 
 def generate_full_answer(state: AgentState, llm) -> dict:
     question = state["current_question"]
     book_answer = state["book_answer"]
     web_context = state["web_context"]
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"]])
-    prompt = f"""You’re a friendly teacher who loves making things clear! Here’s the chat history:
+    # Limit chat history to last 5 messages to reduce tokens
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-5:]])
+    prompt = f"""You’re a friendly teacher who loves making things clear! Here’s the recent chat history:
     {history}
 
     Explain this question in a fun, detailed, and beginner-friendly way: {question}.
     Use the simple book answer and enrich it with web info:
     Book Answer: {book_answer}
-    Web Info: {web_context}
+    Web Info: {web_context[:5000]}  # Limit web context to 5000 characters
     Format the response with proper paragraphs, bullet points for lists, and clear sections.
     Highlight key terms using HTML <span> tags with these colors:
     - Important concepts: <span style="color:#FF4500">term</span>
@@ -322,12 +325,10 @@ def main():
             st.warning("Please enter your OpenAI API key to proceed!")
             return
         else:
-            # Initialize LLM and agent only after API key is provided
             if st.session_state.llm is None or st.session_state.agent is None:
                 st.session_state.llm = initialize_llm()
                 st.session_state.agent = build_workflow(st.session_state.llm)
 
-    # Check if TAVILY_API_KEY is set in the environment
     if not os.getenv("TAVILY_API_KEY"):
         st.error("TAVILY_API_KEY environment variable not found. Please set it in Streamlit Cloud settings.")
         return
@@ -408,7 +409,7 @@ def main():
                         web_state["chat_history"] = st.session_state.chat_history
                         web_state["web_context"] = web_search(web_state)["web_context"]
                         full_answer_dict = generate_full_answer(web_state, st.session_state.llm)
-                        full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"  # Extract the content
+                        full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"
                         img_base64, table_data = generate_visualization(st.session_state.current_question)
                         full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
                         if table_data is not None:
