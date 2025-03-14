@@ -15,6 +15,10 @@ import io
 import base64
 import random
 import pandas as pd
+from dotenv import load_dotenv
+
+# Load API key from .env file
+load_dotenv()
 
 # Step 1: PDF to Markdown Conversion
 def pdf_to_markdown(file_path):
