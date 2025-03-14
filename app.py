@@ -55,7 +55,7 @@ class AgentState(TypedDict):
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question for visualization"]
 
-# Global tools (search_tool can be initialized, llm will be initialized later)
+# Global tools
 search_tool = TavilySearchResults(max_results=5)  # Uses TAVILY_API_KEY from env
 
 def initialize_llm():
@@ -298,6 +298,8 @@ def main():
         st.session_state.openai_api_key = ""
     if "agent" not in st.session_state:
         st.session_state.agent = None
+    if "llm" not in st.session_state:
+        st.session_state.llm = None
     if "retriever" not in st.session_state:
         st.session_state.retriever = None
     if "chat_history" not in st.session_state:
@@ -321,9 +323,9 @@ def main():
             return
         else:
             # Initialize LLM and agent only after API key is provided
-            if st.session_state.agent is None:
-                llm = initialize_llm()
-                st.session_state.agent = build_workflow(llm)
+            if st.session_state.llm is None or st.session_state.agent is None:
+                st.session_state.llm = initialize_llm()
+                st.session_state.agent = build_workflow(st.session_state.llm)
 
     # Check if TAVILY_API_KEY is set in the environment
     if not os.getenv("TAVILY_API_KEY"):
@@ -405,7 +407,7 @@ def main():
                         web_state = st.session_state.pending_web_search.copy()
                         web_state["chat_history"] = st.session_state.chat_history
                         web_state["web_context"] = web_search(web_state)["web_context"]
-                        web_state["full_answer"] = generate_full_answer(web_state, st.session_state.agent.llm)
+                        web_state["full_answer"] = generate_full_answer(web_state, st.session_state.llm)  # Use st.session_state.llm
                         full_response = f"**More Fun Info:** {web_state['full_answer']}"
                         img_base64, table_data = generate_visualization(st.session_state.current_question)
                         full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
