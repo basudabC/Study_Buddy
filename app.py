@@ -281,12 +281,14 @@ def main():
         st.session_state.openai_api_key = ""
     if "tavily_api_key" not in st.session_state:
         st.session_state.tavily_api_key = ""
+    if "tools_initialized" not in st.session_state:
+        st.session_state.tools_initialized = False
 
     with st.sidebar:
         st.header("API Keys")
         st.session_state.openai_api_key = st.text_input(
             "OpenAI API Key",
-            value=st.session_state.openai_api_key,  # Fixed typo here
+            value=st.session_state.openai_api_key,
             type="password"
         )
         st.session_state.tavily_api_key = st.text_input(
@@ -299,17 +301,19 @@ def main():
             st.warning("Please enter both API keys to proceed!")
             return
 
-    # Initialize LLM and search tool with user-provided API keys
+    # Initialize LLM and search tool with user-provided API keys only if not already initialized
     global llm, search_tool
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.5,
-        api_key=st.session_state.openai_api_key
-    )
-    search_tool = TavilySearchResults(
-        max_results=5,
-        api_key=st.session_state.tavily_api_key
-    )
+    if not st.session_state.tools_initialized:
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.5,
+            api_key=st.session_state.openai_api_key
+        )
+        search_tool = TavilySearchResults(
+            max_results=5,
+            tavily_api_key=st.session_state.tavily_api_key  # Explicitly pass the API key
+        )
+        st.session_state.tools_initialized = True
 
     st.write("Upload a book and chat with me! I’ll explain things with visuals and fun facts!")
 
