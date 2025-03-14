@@ -304,7 +304,7 @@ def main():
         st.session_state.retriever = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if "pending_web_search" not in st.session_state:
+    if "pending_web_search" not in AcquisitionState:
         st.session_state.pending_web_search = None
     if "current_question" not in st.session_state:
         st.session_state.current_question = None
@@ -407,8 +407,8 @@ def main():
                         web_state = st.session_state.pending_web_search.copy()
                         web_state["chat_history"] = st.session_state.chat_history
                         web_state["web_context"] = web_search(web_state)["web_context"]
-                        web_state["full_answer"] = generate_full_answer(web_state, st.session_state.llm)  # Use st.session_state.llm
-                        full_response = f"**More Fun Info:** {web_state['full_answer']}"
+                        full_answer_dict = generate_full_answer(web_state, st.session_state.llm)
+                        full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"  # Extract the content
                         img_base64, table_data = generate_visualization(st.session_state.current_question)
                         full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
                         if table_data is not None:
