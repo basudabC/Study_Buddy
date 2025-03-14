@@ -21,6 +21,21 @@ import io
 import base64
 import random
 import pandas as pd
+import tiktoken
+
+# Token counting function using tiktoken
+def count_tokens(text: str, model: str = "gpt-4o-mini") -> int:
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
+
+# Trim text to fit within token limit
+def trim_text(text: str, max_tokens: int, model: str = "gpt-4o-mini") -> str:
+    encoding = tiktoken.encoding_for_model(model)
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    trimmed_tokens = tokens[:max_tokens]
+    return encoding.decode(trimmed_tokens)
 
 # Step 1: PDF to Markdown Conversion
 def pdf_to_markdown(file_path):
@@ -56,11 +71,11 @@ class AgentState(TypedDict):
     current_question: Annotated[str, "Current question for visualization"]
 
 # Global tools
-search_tool = TavilySearchResults(max_results=3)  # Reduced from 5 to limit tokens
+search_tool = TavilySearchResults(max_results=2)  # Reduced to 2 for token efficiency
 
 def initialize_llm():
     return ChatOpenAI(
-        model="gpt-4o-mini",
+        model="gpt-4o-mini",  # Switch to "gpt-3.5-turbo" if preferred (16,385 token limit)
         temperature=0.5,
         api_key=st.session_state.openai_api_key
     )
@@ -75,46 +90,68 @@ def retrieve_from_book(state: AgentState) -> dict:
 def simplify_book_answer(state: AgentState, llm) -> dict:
     question = state["messages"][-1].content
     context = state["book_context"]
-    # Limit chat history to last 5 messages to reduce tokens
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-5:]])
+    # Limit history to last 3 messages, trim if needed
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-3:]])
     prompt = f"""Here’s the recent chat history:
     {history}
 
     Answer this question using the Markdown-formatted book content: {question}
     Context: {context}
     If the context doesn’t have enough info, say 'Hmm, the book doesn’t tell me much about this!'"""
+    # Trim prompt to 50,000 tokens (leaving room for response)
+    prompt = trim_text(prompt, max_tokens=50000)
     response = llm.invoke(prompt)
     simplify_prompt = f"""Take this answer and explain it in a clear, easy-to-understand way—like you're teaching a curious beginner or a young student. Keep all the key information, break it down step by step, and use simple words, relatable examples, and a fun, engaging tone:
     Answer: {response.content}"""
+    simplify_prompt = trim_text(simplify_prompt, max_tokens=50000)
     simplified = llm.invoke(simplify_prompt)
     return {"book_answer": simplified.content}
 
 def web_search(state: AgentState) -> dict:
     question = state["current_question"]
     results = search_tool.invoke({"query": f"{question} detailed explanation for beginners"})
-    # Limit web context to first 1000 characters per result to reduce tokens
-    context = "\n".join(result["content"][:1000] for result in results)
+    # Limit each result to 500 characters
+    context = "\n".join(result["content"][:500] for result in results)
     return {"web_context": context}
 
 def generate_full_answer(state: AgentState, llm) -> dict:
     question = state["current_question"]
     book_answer = state["book_answer"]
     web_context = state["web_context"]
-    # Limit chat history to last 5 messages to reduce tokens
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-5:]])
+    # Limit history to last 3 messages
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-3:]])
     prompt = f"""You’re a friendly teacher who loves making things clear! Here’s the recent chat history:
     {history}
 
     Explain this question in a fun, detailed, and beginner-friendly way: {question}.
     Use the simple book answer and enrich it with web info:
     Book Answer: {book_answer}
-    Web Info: {web_context[:5000]}  # Limit web context to 5000 characters
+    Web Info: {web_context}
     Format the response with proper paragraphs, bullet points for lists, and clear sections.
     Highlight key terms using HTML <span> tags with these colors:
     - Important concepts: <span style="color:#FF4500">term</span>
     - Processes: <span style="color:#1E90FF">term</span>
     - Examples: <span style="color:#32CD32">term</span>
     Make it engaging, accurate, and add a 'Basics of this Topic' section at the end!"""
+    # Ensure total prompt is under 120,000 tokens
+    total_tokens = count_tokens(prompt)
+    if total_tokens > 120000:
+        excess = total_tokens - 120000
+        web_context_tokens = count_tokens(web_context)
+        web_context = trim_text(web_context, max_tokens=max(500, web_context_tokens - excess))
+        prompt = f"""You’re a friendly teacher who loves making things clear! Here’s the recent chat history:
+        {history}
+
+        Explain this question in a fun, detailed, and beginner-friendly way: {question}.
+        Use the simple book answer and enrich it with web info:
+        Book Answer: {book_answer}
+        Web Info: {web_context}
+        Format the response with proper paragraphs, bullet points for lists, and clear sections.
+        Highlight key terms using HTML <span> tags with these colors:
+        - Important concepts: <span style="color:#FF4500">term</span>
+        - Processes: <span style="color:#1E90FF">term</span>
+        - Examples: <span style="color:#32CD32">term</span>
+        Make it engaging, accurate, and add a 'Basics of this Topic' section at the end!"""
     response = llm.invoke(prompt)
     return {"full_answer": response.content}
 
