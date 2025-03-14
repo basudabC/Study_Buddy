@@ -304,7 +304,7 @@ def main():
         st.session_state.retriever = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if "pending_web_search" not in AcquisitionState:
+    if "pending_web_search" not in st.session_state:
         st.session_state.pending_web_search = None
     if "current_question" not in st.session_state:
         st.session_state.current_question = None
