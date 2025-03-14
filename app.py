@@ -49,16 +49,16 @@ class AgentState(TypedDict):
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question for visualization"]
 
-def initialize_tools():
-    global llm, search_tool
+# Global tools
+llm = None
+search_tool = TavilySearchResults(max_results=5)  # Will use TAVILY_API_KEY from env
+
+def initialize_llm():
+    global llm
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.5,
         api_key=st.session_state.openai_api_key
-    )
-    search_tool = TavilySearchResults(
-        max_results=5,
-        tavily_api_key=st.session_state.tavily_api_key
     )
 
 def retrieve_from_book(state: AgentState) -> dict:
@@ -288,35 +288,33 @@ def main():
 
     st.title("Your Study Buddy 📚")
     
-    # Initialize session state for API keys and tools
+    # Initialize session state for OpenAI API key
     if "openai_api_key" not in st.session_state:
         st.session_state.openai_api_key = ""
-    if "tavily_api_key" not in st.session_state:
-        st.session_state.tavily_api_key = ""
-    if "tools_initialized" not in st.session_state:
-        st.session_state.tools_initialized = False
+    if "llm_initialized" not in st.session_state:
+        st.session_state.llm_initialized = False
 
     with st.sidebar:
-        st.header("API Keys")
+        st.header("API Key")
         st.session_state.openai_api_key = st.text_input(
             "OpenAI API Key",
             value=st.session_state.openai_api_key,
             type="password"
         )
-        st.session_state.tavily_api_key = st.text_input(
-            "Tavily API Key",
-            value=st.session_state.tavily_api_key,
-            type="password"
-        )
+        st.info("Note: Tavily API Key must be set as an environment variable (TAVILY_API_KEY) in Streamlit Cloud settings.")
         
-        if not st.session_state.openai_api_key or not st.session_state.tavily_api_key:
-            st.warning("Please enter both API keys to proceed!")
+        if not st.session_state.openai_api_key:
+            st.warning("Please enter your OpenAI API key to proceed!")
             return
         else:
-            # Initialize tools only after API keys are provided
-            if not st.session_state.tools_initialized:
-                initialize_tools()
-                st.session_state.tools_initialized = True
+            if not st.session_state.llm_initialized:
+                initialize_llm()
+                st.session_state.llm_initialized = True
+
+    # Check if TAVILY_API_KEY is set in the environment
+    if not os.getenv("TAVILY_API_KEY"):
+        st.error("TAVILY_API_KEY environment variable not found. Please set it in Streamlit Cloud settings.")
+        return
 
     st.write("Upload a book and chat with me! I’ll explain things with visuals and fun facts!")
 
