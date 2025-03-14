@@ -49,6 +49,18 @@ class AgentState(TypedDict):
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question for visualization"]
 
+def initialize_tools():
+    global llm, search_tool
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.5,
+        api_key=st.session_state.openai_api_key
+    )
+    search_tool = TavilySearchResults(
+        max_results=5,
+        tavily_api_key=st.session_state.tavily_api_key
+    )
+
 def retrieve_from_book(state: AgentState) -> dict:
     question = state["messages"][-1].content
     docs = st.session_state.retriever.invoke(question)
@@ -276,7 +288,7 @@ def main():
 
     st.title("Your Study Buddy 📚")
     
-    # Add API key input fields
+    # Initialize session state for API keys and tools
     if "openai_api_key" not in st.session_state:
         st.session_state.openai_api_key = ""
     if "tavily_api_key" not in st.session_state:
@@ -300,20 +312,11 @@ def main():
         if not st.session_state.openai_api_key or not st.session_state.tavily_api_key:
             st.warning("Please enter both API keys to proceed!")
             return
-
-    # Initialize LLM and search tool with user-provided API keys only if not already initialized
-    global llm, search_tool
-    if not st.session_state.tools_initialized:
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.5,
-            api_key=st.session_state.openai_api_key
-        )
-        search_tool = TavilySearchResults(
-            max_results=5,
-            tavily_api_key=st.session_state.tavily_api_key  # Explicitly pass the API key
-        )
-        st.session_state.tools_initialized = True
+        else:
+            # Initialize tools only after API keys are provided
+            if not st.session_state.tools_initialized:
+                initialize_tools()
+                st.session_state.tools_initialized = True
 
     st.write("Upload a book and chat with me! I’ll explain things with visuals and fun facts!")
 
