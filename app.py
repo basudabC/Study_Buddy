@@ -55,13 +55,11 @@ class AgentState(TypedDict):
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question for visualization"]
 
-# Global tools
-llm = None
+# Global tools (search_tool can be initialized, llm will be initialized later)
 search_tool = TavilySearchResults(max_results=5)  # Uses TAVILY_API_KEY from env
 
 def initialize_llm():
-    global llm
-    llm = ChatOpenAI(
+    return ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.5,
         api_key=st.session_state.openai_api_key
@@ -74,7 +72,7 @@ def retrieve_from_book(state: AgentState) -> dict:
     needs_web = not context or len(context.strip()) < 50
     return {"book_context": context, "needs_web_search": needs_web, "current_question": question}
 
-def simplify_book_answer(state: AgentState) -> dict:
+def simplify_book_answer(state: AgentState, llm) -> dict:
     question = state["messages"][-1].content
     context = state["book_context"]
     history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"]])
@@ -96,7 +94,7 @@ def web_search(state: AgentState) -> dict:
     context = "\n".join(result["content"] for result in results)
     return {"web_context": context}
 
-def generate_full_answer(state: AgentState) -> dict:
+def generate_full_answer(state: AgentState, llm) -> dict:
     question = state["current_question"]
     book_answer = state["book_answer"]
     web_context = state["web_context"]
@@ -121,6 +119,22 @@ def route_after_book(state: AgentState) -> Literal["end", "web_search"]:
     if state["needs_web_search"]:
         return "web_search"
     return "end"
+
+# Step 3: Build the Agent Workflow
+def build_workflow(llm):
+    workflow = StateGraph(AgentState)
+    workflow.add_node("retrieve_book", retrieve_from_book)
+    workflow.add_node("simplify_book", lambda state: simplify_book_answer(state, llm))
+    workflow.add_node("web_search", web_search)
+    workflow.add_node("generate_full", lambda state: generate_full_answer(state, llm))
+
+    workflow.add_edge(START, "retrieve_book")
+    workflow.add_edge("retrieve_book", "simplify_book")
+    workflow.add_conditional_edges("simplify_book", route_after_book, {"end": END, "web_search": "web_search"})
+    workflow.add_edge("web_search", "generate_full")
+    workflow.add_edge("generate_full", END)
+
+    return workflow.compile()
 
 # Enhanced Visualization Function
 def generate_visualization(topic):
@@ -204,21 +218,6 @@ def generate_visualization(topic):
         plt.close()
         return img_base64, None
 
-# Step 3: Build the Agent Workflow
-workflow = StateGraph(AgentState)
-workflow.add_node("retrieve_book", retrieve_from_book)
-workflow.add_node("simplify_book", simplify_book_answer)
-workflow.add_node("web_search", web_search)
-workflow.add_node("generate_full", generate_full_answer)
-
-workflow.add_edge(START, "retrieve_book")
-workflow.add_edge("retrieve_book", "simplify_book")
-workflow.add_conditional_edges("simplify_book", route_after_book, {"end": END, "web_search": "web_search"})
-workflow.add_edge("web_search", "generate_full")
-workflow.add_edge("generate_full", END)
-
-agent = workflow.compile()
-
 # Step 4: Streamlit Study Interface
 def main():
     st.markdown("""
@@ -294,11 +293,19 @@ def main():
 
     st.title("Your Study Buddy 📚")
     
-    # Initialize session state for OpenAI API key
+    # Initialize session state
     if "openai_api_key" not in st.session_state:
         st.session_state.openai_api_key = ""
-    if "llm_initialized" not in st.session_state:
-        st.session_state.llm_initialized = False
+    if "agent" not in st.session_state:
+        st.session_state.agent = None
+    if "retriever" not in st.session_state:
+        st.session_state.retriever = None
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if "pending_web_search" not in st.session_state:
+        st.session_state.pending_web_search = None
+    if "current_question" not in st.session_state:
+        st.session_state.current_question = None
 
     with st.sidebar:
         st.header("API Key")
@@ -313,9 +320,10 @@ def main():
             st.warning("Please enter your OpenAI API key to proceed!")
             return
         else:
-            if not st.session_state.llm_initialized:
-                initialize_llm()
-                st.session_state.llm_initialized = True
+            # Initialize LLM and agent only after API key is provided
+            if st.session_state.agent is None:
+                llm = initialize_llm()
+                st.session_state.agent = build_workflow(llm)
 
     # Check if TAVILY_API_KEY is set in the environment
     if not os.getenv("TAVILY_API_KEY"):
@@ -323,15 +331,6 @@ def main():
         return
 
     st.write("Upload a book and chat with me! I’ll explain things with visuals and fun facts!")
-
-    if "retriever" not in st.session_state:
-        st.session_state.retriever = None
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    if "pending_web_search" not in st.session_state:
-        st.session_state.pending_web_search = None
-    if "current_question" not in st.session_state:
-        st.session_state.current_question = None
 
     if st.button("Clear Chat"):
         st.session_state.chat_history = []
@@ -349,7 +348,7 @@ def main():
         st.success("Book converted to Markdown and ready to chat!")
         os.remove("temp_book.pdf")
 
-    if st.session_state.retriever is not None:
+    if st.session_state.retriever is not None and st.session_state.agent is not None:
         with st.container():
             st.markdown('<div class="chat-container">', unsafe_allow_html=True)
             for message in st.session_state.chat_history:
@@ -380,7 +379,7 @@ def main():
                     "chat_history": st.session_state.chat_history[:-1],
                     "current_question": question
                 }
-                result = agent.invoke(initial_state)
+                result = st.session_state.agent.invoke(initial_state)
 
                 book_response = f"**From the Book (Simple):** {result['book_answer']}"
                 if result["needs_web_search"]:
@@ -406,7 +405,7 @@ def main():
                         web_state = st.session_state.pending_web_search.copy()
                         web_state["chat_history"] = st.session_state.chat_history
                         web_state["web_context"] = web_search(web_state)["web_context"]
-                        web_state["full_answer"] = generate_full_answer(web_state)["full_answer"]
+                        web_state["full_answer"] = generate_full_answer(web_state, st.session_state.agent.llm)
                         full_response = f"**More Fun Info:** {web_state['full_answer']}"
                         img_base64, table_data = generate_visualization(st.session_state.current_question)
                         full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
@@ -422,7 +421,10 @@ def main():
                 if st.button("No, I’m good!"):
                     st.session_state.pending_web_search = None
     else:
-        st.warning("Please upload a book to start chatting!")
+        if st.session_state.retriever is None:
+            st.warning("Please upload a book to start chatting!")
+        if st.session_state.agent is None:
+            st.warning("Please enter your OpenAI API key to enable the chat functionality!")
 
 if __name__ == "__main__":
     main()
