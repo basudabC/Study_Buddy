@@ -88,7 +88,7 @@ class AgentState(TypedDict):
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question"]
 
-search_tool = TavilySearchResults(max_results=5)  # Increased to 5 for broader web results
+search_tool = TavilySearchResults(max_results=5)
 
 def initialize_llm():
     return ChatOpenAI(
@@ -127,7 +127,7 @@ def book_answer(state: AgentState, llm) -> dict:
 def web_search(state: AgentState) -> dict:
     question = state["current_question"]
     results = search_tool.invoke({"query": question})
-    context = "\n".join(result["content"] for result in results)  # Full content, no truncation here
+    context = "\n".join(result["content"] for result in results)
     return {"web_context": context}
 
 def summarize_web_results(state: AgentState, llm) -> dict:
@@ -154,12 +154,12 @@ def route_after_book(state: AgentState) -> Literal["end", "web_search"]:
 def build_workflow(llm):
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve_book", retrieve_from_book)
-    workflow.add_node("book_answer", lambda state: book_answer(state, llm))
+    workflow.add_node("generate_book_answer", lambda state: book_answer(state, llm))  # Renamed node
     workflow.add_node("web_search", web_search)
     workflow.add_node("summarize_web", lambda state: summarize_web_results(state, llm))
     workflow.add_edge(START, "retrieve_book")
-    workflow.add_edge("retrieve_book", "book_answer")
-    workflow.add_conditional_edges("book_answer", route_after_book, {"end": END, "web_search": "web_search"})
+    workflow.add_edge("retrieve_book", "generate_book_answer")
+    workflow.add_conditional_edges("generate_book_answer", route_after_book, {"end": END, "web_search": "web_search"})
     workflow.add_edge("web_search", "summarize_web")
     workflow.add_edge("summarize_web", END)
     return workflow.compile()
