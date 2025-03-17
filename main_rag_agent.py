@@ -24,7 +24,7 @@ import tiktoken
 import json
 from openai import RateLimitError
 
-# Token counting function using tiktoken
+# Token counting function
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
     encoding = tiktoken.encoding_for_model(model)
     return len(encoding.encode(text))
@@ -82,13 +82,13 @@ class AgentState(TypedDict):
     messages: Annotated[list, "List of messages in the conversation"]
     book_context: Annotated[str, "Context retrieved from the book"]
     web_context: Annotated[str, "Context retrieved from the web"]
-    book_answer: Annotated[str, "Simplified answer from the book"]
-    full_answer: Annotated[str, "Final friendly and detailed answer"]
+    book_answer: Annotated[str, "Answer from the book"]
+    full_answer: Annotated[str, "Final answer"]
     needs_web_search: Annotated[bool, "Whether web search is needed"]
     chat_history: Annotated[list, "Full chat history for memory"]
-    current_question: Annotated[str, "Current question for visualization"]
+    current_question: Annotated[str, "Current question"]
 
-search_tool = TavilySearchResults(max_results=1)  # Reduced to 1 to lower token usage
+search_tool = TavilySearchResults(max_results=5)  # Increased to 5 for broader web results
 
 def initialize_llm():
     return ChatOpenAI(
@@ -101,59 +101,43 @@ def retrieve_from_book(state: AgentState) -> dict:
     question = state["messages"][-1].content
     docs = st.session_state.retriever.invoke(question)
     context = "\n\n".join(doc.page_content for doc in docs)
-    # Trim context to 10,000 tokens to avoid overloading
     context = trim_text(context, max_tokens=10000)
     needs_web = not context or len(context.strip()) < 50
     return {"book_context": context, "needs_web_search": needs_web, "current_question": question}
 
-def simplify_book_answer(state: AgentState, llm) -> dict:
+def book_answer(state: AgentState, llm) -> dict:
     question = state["messages"][-1].content
     context = state["book_context"]
-    # Limit history to last 2 messages to reduce tokens
     history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-2:]])
-    prompt = f"""Here’s the recent chat history:
+    prompt = f"""Based on this recent chat history:
     {history}
 
     Answer this question using the book content: {question}
     Context: {context}
-    If the context lacks info, say 'Hmm, the book doesn’t tell me much about this!'"""
-    # Trim to 15,000 tokens (half of TPM limit)
+    If the context doesn’t have enough info, say 'The book doesn’t give me much on this, sorry!' 
+    Keep it natural and easy to follow, like you’re explaining it to a friend."""
     prompt = trim_text(prompt, max_tokens=15000)
     try:
         response = llm.invoke(prompt)
-        simplify_prompt = f"""Explain this in a clear, beginner-friendly way with simple words and fun examples:
-        Answer: {response.content}"""
-        simplify_prompt = trim_text(simplify_prompt, max_tokens=15000)
-        simplified = llm.invoke(simplify_prompt)
-        return {"book_answer": simplified.content}
+        return {"book_answer": response.content}
     except RateLimitError as e:
         st.error(f"Rate limit exceeded: {e}. Please wait a minute and try again.")
         return {"book_answer": "Oops! I hit a rate limit. Try again in a minute!"}
 
 def web_search(state: AgentState) -> dict:
     question = state["current_question"]
-    results = search_tool.invoke({"query": f"{question} explanation for beginners"})
-    # Limit to 300 chars per result
-    context = "\n".join(result["content"][:300] for result in results)
+    results = search_tool.invoke({"query": question})
+    context = "\n".join(result["content"] for result in results)  # Full content, no truncation here
     return {"web_context": context}
 
-def generate_full_answer(state: AgentState, llm) -> dict:
+def summarize_web_results(state: AgentState, llm) -> dict:
     question = state["current_question"]
-    book_answer = state["book_answer"]
     web_context = state["web_context"]
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-2:]])
-    prompt = f"""You’re a friendly teacher! Here’s the recent chat history:
-    {history}
-
-    Explain this question in a fun, beginner-friendly way: {question}.
-    Use the book answer and web info:
-    Book Answer: {book_answer}
+    prompt = f"""Here’s a bunch of info I found on the web about: {question}
     Web Info: {web_context}
-    Use paragraphs, bullet points, and a 'Basics' section. Highlight terms with HTML <span> tags:
-    - Concepts: <span style="color:#FF4500">term</span>
-    - Processes: <span style="color:#1E90FF">term</span>
-    - Examples: <span style="color:#32CD32">term</span>"""
-    # Trim to 15,000 tokens
+
+    Summarize this in a way that’s easy to understand, like you’re chatting with a friend. 
+    Include a simple example to make it clear. Keep the original meaning intact."""
     prompt = trim_text(prompt, max_tokens=15000)
     try:
         response = llm.invoke(prompt)
@@ -170,17 +154,17 @@ def route_after_book(state: AgentState) -> Literal["end", "web_search"]:
 def build_workflow(llm):
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve_book", retrieve_from_book)
-    workflow.add_node("simplify_book", lambda state: simplify_book_answer(state, llm))
+    workflow.add_node("book_answer", lambda state: book_answer(state, llm))
     workflow.add_node("web_search", web_search)
-    workflow.add_node("generate_full", lambda state: generate_full_answer(state, llm))
+    workflow.add_node("summarize_web", lambda state: summarize_web_results(state, llm))
     workflow.add_edge(START, "retrieve_book")
-    workflow.add_edge("retrieve_book", "simplify_book")
-    workflow.add_conditional_edges("simplify_book", route_after_book, {"end": END, "web_search": "web_search"})
-    workflow.add_edge("web_search", "generate_full")
-    workflow.add_edge("generate_full", END)
+    workflow.add_edge("retrieve_book", "book_answer")
+    workflow.add_conditional_edges("book_answer", route_after_book, {"end": END, "web_search": "web_search"})
+    workflow.add_edge("web_search", "summarize_web")
+    workflow.add_edge("summarize_web", END)
     return workflow.compile()
 
-# Visualization Function (abbreviated)
+# Visualization Function (unchanged)
 def generate_visualization(topic):
     if topic is None:
         topic = "Unknown Topic"
@@ -274,7 +258,6 @@ def main():
 
     st.title("Your Study Buddy 📚")
 
-    # Session State Initialization
     if "openai_api_key" not in st.session_state:
         st.session_state.openai_api_key = ""
     if "agent" not in st.session_state:
@@ -374,9 +357,7 @@ def main():
                 }
                 try:
                     result = st.session_state.agent.invoke(initial_state)
-                    book_response = f"**From the Book (Simple):** {result['book_answer']}"
-                    if result["needs_web_search"]:
-                        book_response += f"\n\n**More Fun Info:** {result['full_answer']}"
+                    book_response = f"**From the Book:** {result['book_answer']}"
                     img_base64, table_data = generate_visualization(question)
                     book_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
                     if table_data is not None:
@@ -391,7 +372,6 @@ def main():
                     st.error(f"Rate limit exceeded: {e}. Please wait a minute and try again.")
                     st.session_state.chat_history.append({"role": "assistant", "content": "Oops! I hit a rate limit. Try again in a minute!"})
 
-                # Save session
                 if not st.session_state.session_id:
                     st.session_state.session_id = str(random.randint(1000, 9999))
                     st.info(f"New session ID: {st.session_state.session_id}")
@@ -406,8 +386,8 @@ def main():
                         web_state["chat_history"] = st.session_state.chat_history
                         web_state["web_context"] = web_search(web_state)["web_context"]
                         try:
-                            full_answer_dict = generate_full_answer(web_state, st.session_state.llm)
-                            full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"
+                            web_summary = summarize_web_results(web_state, st.session_state.llm)
+                            full_response = f"**Here’s What I Found Online:**\n\n{web_summary['full_answer']}"
                             img_base64, table_data = generate_visualization(st.session_state.current_question)
                             full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
                             if table_data is not None:
