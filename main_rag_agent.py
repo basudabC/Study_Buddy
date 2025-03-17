@@ -22,6 +22,7 @@ import random
 import pandas as pd
 import tiktoken
 import json
+from openai import RateLimitError
 
 # Token counting function using tiktoken
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
@@ -42,7 +43,7 @@ def extract_images_and_ocr(file_path):
     try:
         pytesseract.get_tesseract_version()
     except pytesseract.TesseractNotFoundError:
-        st.error("Tesseract is not installed or not in your PATH. Please install it (e.g., 'sudo apt-get install tesseract-ocr' on Ubuntu, or add to packages.txt for Streamlit Cloud).")
+        st.error("Tesseract is not installed or not in your PATH. Install it (e.g., 'sudo apt-get install tesseract-ocr' or add to packages.txt for Streamlit Cloud).")
         return ""
     combined_text = ""
     with open(file_path, "rb") as file:
@@ -87,7 +88,7 @@ class AgentState(TypedDict):
     chat_history: Annotated[list, "Full chat history for memory"]
     current_question: Annotated[str, "Current question for visualization"]
 
-search_tool = TavilySearchResults(max_results=2)
+search_tool = TavilySearchResults(max_results=1)  # Reduced to 1 to lower token usage
 
 def initialize_llm():
     return ChatOpenAI(
@@ -100,58 +101,66 @@ def retrieve_from_book(state: AgentState) -> dict:
     question = state["messages"][-1].content
     docs = st.session_state.retriever.invoke(question)
     context = "\n\n".join(doc.page_content for doc in docs)
+    # Trim context to 10,000 tokens to avoid overloading
+    context = trim_text(context, max_tokens=10000)
     needs_web = not context or len(context.strip()) < 50
     return {"book_context": context, "needs_web_search": needs_web, "current_question": question}
 
 def simplify_book_answer(state: AgentState, llm) -> dict:
     question = state["messages"][-1].content
     context = state["book_context"]
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-3:]])
+    # Limit history to last 2 messages to reduce tokens
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-2:]])
     prompt = f"""Here’s the recent chat history:
     {history}
 
-    Answer this question using the Markdown-formatted book content: {question}
+    Answer this question using the book content: {question}
     Context: {context}
-    If the context doesn’t have enough info, say 'Hmm, the book doesn’t tell me much about this!'"""
-    prompt = trim_text(prompt, max_tokens=50000)
-    response = llm.invoke(prompt)
-    simplify_prompt = f"""Take this answer and explain it in a clear, easy-to-understand way—like you're teaching a beginner. Use simple words, examples, and a fun tone:
-    Answer: {response.content}"""
-    simplify_prompt = trim_text(simplify_prompt, max_tokens=50000)
-    simplified = llm.invoke(simplify_prompt)
-    return {"book_answer": simplified.content}
+    If the context lacks info, say 'Hmm, the book doesn’t tell me much about this!'"""
+    # Trim to 15,000 tokens (half of TPM limit)
+    prompt = trim_text(prompt, max_tokens=15000)
+    try:
+        response = llm.invoke(prompt)
+        simplify_prompt = f"""Explain this in a clear, beginner-friendly way with simple words and fun examples:
+        Answer: {response.content}"""
+        simplify_prompt = trim_text(simplify_prompt, max_tokens=15000)
+        simplified = llm.invoke(simplify_prompt)
+        return {"book_answer": simplified.content}
+    except RateLimitError as e:
+        st.error(f"Rate limit exceeded: {e}. Please wait a minute and try again.")
+        return {"book_answer": "Oops! I hit a rate limit. Try again in a minute!"}
 
 def web_search(state: AgentState) -> dict:
     question = state["current_question"]
-    results = search_tool.invoke({"query": f"{question} detailed explanation for beginners"})
-    context = "\n".join(result["content"][:500] for result in results)
+    results = search_tool.invoke({"query": f"{question} explanation for beginners"})
+    # Limit to 300 chars per result
+    context = "\n".join(result["content"][:300] for result in results)
     return {"web_context": context}
 
 def generate_full_answer(state: AgentState, llm) -> dict:
     question = state["current_question"]
     book_answer = state["book_answer"]
     web_context = state["web_context"]
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-3:]])
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-2:]])
     prompt = f"""You’re a friendly teacher! Here’s the recent chat history:
     {history}
 
-    Explain this question in a fun, detailed, beginner-friendly way: {question}.
-    Use the simple book answer and enrich with web info:
+    Explain this question in a fun, beginner-friendly way: {question}.
+    Use the book answer and web info:
     Book Answer: {book_answer}
     Web Info: {web_context}
-    Format with paragraphs, bullet points, and sections. Highlight terms with HTML <span> tags:
+    Use paragraphs, bullet points, and a 'Basics' section. Highlight terms with HTML <span> tags:
     - Concepts: <span style="color:#FF4500">term</span>
     - Processes: <span style="color:#1E90FF">term</span>
-    - Examples: <span style="color:#32CD32">term</span>
-    Add a 'Basics of this Topic' section!"""
-    total_tokens = count_tokens(prompt)
-    if total_tokens > 120000:
-        excess = total_tokens - 120000
-        web_context_tokens = count_tokens(web_context)
-        web_context = trim_text(web_context, max_tokens=max(500, web_context_tokens - excess))
-        prompt = prompt.replace(state["web_context"], web_context)
-    response = llm.invoke(prompt)
-    return {"full_answer": response.content}
+    - Examples: <span style="color:#32CD32">term</span>"""
+    # Trim to 15,000 tokens
+    prompt = trim_text(prompt, max_tokens=15000)
+    try:
+        response = llm.invoke(prompt)
+        return {"full_answer": response.content}
+    except RateLimitError as e:
+        st.error(f"Rate limit exceeded: {e}. Please wait a minute and try again.")
+        return {"full_answer": "Oops! I hit a rate limit. Try again in a minute!"}
 
 def route_after_book(state: AgentState) -> Literal["end", "web_search"]:
     if state["needs_web_search"]:
@@ -171,7 +180,7 @@ def build_workflow(llm):
     workflow.add_edge("generate_full", END)
     return workflow.compile()
 
-# Visualization Function (unchanged, abbreviated)
+# Visualization Function (abbreviated)
 def generate_visualization(topic):
     if topic is None:
         topic = "Unknown Topic"
@@ -363,20 +372,24 @@ def main():
                     "chat_history": st.session_state.chat_history[:-1],
                     "current_question": question
                 }
-                result = st.session_state.agent.invoke(initial_state)
-                book_response = f"**From the Book (Simple):** {result['book_answer']}"
-                if result["needs_web_search"]:
-                    book_response += f"\n\n**More Fun Info:** {result['full_answer']}"
-                img_base64, table_data = generate_visualization(question)
-                book_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
-                if table_data is not None:
-                    book_response += f"\n\n**Related Data:**\n\n{table_data.to_html(index=False, classes='table table-striped')}"
-                st.session_state.chat_history.append({"role": "assistant", "content": book_response})
-                with st.chat_message("assistant"):
-                    st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                    st.markdown(f"<div class='chat-message assistant-message'>{book_response}</div>", unsafe_allow_html=True)
-                if not result["needs_web_search"]:
-                    st.session_state.pending_web_search = result
+                try:
+                    result = st.session_state.agent.invoke(initial_state)
+                    book_response = f"**From the Book (Simple):** {result['book_answer']}"
+                    if result["needs_web_search"]:
+                        book_response += f"\n\n**More Fun Info:** {result['full_answer']}"
+                    img_base64, table_data = generate_visualization(question)
+                    book_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
+                    if table_data is not None:
+                        book_response += f"\n\n**Related Data:**\n\n{table_data.to_html(index=False, classes='table table-striped')}"
+                    st.session_state.chat_history.append({"role": "assistant", "content": book_response})
+                    with st.chat_message("assistant"):
+                        st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
+                        st.markdown(f"<div class='chat-message assistant-message'>{book_response}</div>", unsafe_allow_html=True)
+                    if not result["needs_web_search"]:
+                        st.session_state.pending_web_search = result
+                except RateLimitError as e:
+                    st.error(f"Rate limit exceeded: {e}. Please wait a minute and try again.")
+                    st.session_state.chat_history.append({"role": "assistant", "content": "Oops! I hit a rate limit. Try again in a minute!"})
 
                 # Save session
                 if not st.session_state.session_id:
@@ -392,18 +405,22 @@ def main():
                         web_state = st.session_state.pending_web_search.copy()
                         web_state["chat_history"] = st.session_state.chat_history
                         web_state["web_context"] = web_search(web_state)["web_context"]
-                        full_answer_dict = generate_full_answer(web_state, st.session_state.llm)
-                        full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"
-                        img_base64, table_data = generate_visualization(st.session_state.current_question)
-                        full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
-                        if table_data is not None:
-                            full_response += f"\n\n**Related Data:**\n\n{table_data.to_html(index=False, classes='table table-striped')}"
-                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-                        with st.chat_message("assistant"):
-                            st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                            st.markdown(f"<div class='chat-message assistant-message'>{full_response}</div>", unsafe_allow_html=True)
-                        st.session_state.pending_web_search = None
-                        save_session(st.session_state.session_id, st.session_state.chat_history)
+                        try:
+                            full_answer_dict = generate_full_answer(web_state, st.session_state.llm)
+                            full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"
+                            img_base64, table_data = generate_visualization(st.session_state.current_question)
+                            full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
+                            if table_data is not None:
+                                full_response += f"\n\n**Related Data:**\n\n{table_data.to_html(index=False, classes='table table-striped')}"
+                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                            with st.chat_message("assistant"):
+                                st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
+                                st.markdown(f"<div class='chat-message assistant-message'>{full_response}</div>", unsafe_allow_html=True)
+                            st.session_state.pending_web_search = None
+                            save_session(st.session_state.session_id, st.session_state.chat_history)
+                        except RateLimitError as e:
+                            st.error(f"Rate limit exceeded: {e}. Please wait a minute and try again.")
+                            st.session_state.chat_history.append({"role": "assistant", "content": "Oops! I hit a rate limit. Try again in a minute!"})
             with col2:
                 if st.button("No, I’m good!"):
                     st.session_state.pending_web_search = None
