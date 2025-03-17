@@ -13,3 +13,4 @@ python-dotenv==1.0.1
 streamlit==1.43.2
 pysqlite3-binary
 tiktoken
+pytesseract
