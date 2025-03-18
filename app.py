@@ -19,10 +19,15 @@ from openai import RateLimitError
 import tiktoken
 import io
 import logging
+import chromadb
 
 # Set up logging for debug mode
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Log library versions for debugging
+logger.debug(f"chromadb version: {chromadb.__version__}")
+logger.debug(f"langchain_community version: {Chroma.__module__.split('.')[0]}.{Chroma.__module__.split('.')[1]}.__version__ not directly accessible, assuming installed version")
 
 # Verify sqlite3 availability
 try:
@@ -122,8 +127,14 @@ def create_vector_store(markdown_text):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = text_splitter.split_text(markdown_text)
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=st.session_state.openai_api_key)
-    vector_store = Chroma.from_texts(chunks, embeddings, collection_name="book_content", persist_directory="book_db")
-    return vector_store
+    try:
+        vector_store = Chroma.from_texts(chunks, embeddings, collection_name="book_content", persist_directory="book_db")
+        logger.debug("Vector store created successfully.")
+        return vector_store
+    except AttributeError as e:
+        logger.error(f"Chroma initialization failed: {e}")
+        st.error(f"Error initializing Chroma vector store: {e}. Check chromadb version compatibility.")
+        raise
 
 # Agent State
 class AgentState(TypedDict):
@@ -355,9 +366,9 @@ def main():
                 with st.chat_message(message["role"]):
                     if message["role"] == "user":
                         st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=user{random.randint(1, 100)}" class="avatar user-avatar"/>', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                    st.markdown(f"<div class='chat-message {message['role']}-message'>{message['content']}</div>", unsafe_allow_html=True)
+                    CHARACTER_LIMIT = 10000  # Define a reasonable character limit
+                    truncated_content = message["content"][:CHARACTER_LIMIT] + "..." if len(message["content"]) > CHARACTER_LIMIT else message["content"]
+                    st.markdown(f"<div class='chat-message {message['role']}-message'>{truncated_content}</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
         question = st.chat_input("Ask me anything about the book!")
