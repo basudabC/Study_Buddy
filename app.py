@@ -1,8 +1,8 @@
 import os
 import streamlit as st
-import sqlite3
+import pysqlite3
 import sys
-#sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 from typing import TypedDict, Annotated, Literal
 import PyPDF2
 from PIL import Image
