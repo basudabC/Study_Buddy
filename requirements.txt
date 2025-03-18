@@ -3,10 +3,10 @@ PyPDF2==3.0.1
 Pillow==10.4.0
 pytesseract==0.3.10
 markdownify==0.11.6
-langchain-openai==0.1.17
-langchain-community==0.0.38
-langchain==0.1.20
-openai==1.35.13
+langchain-openai
+langchain-community
+langchain
+openai
 tiktoken==0.7.0
 duckduckgo-search==6.2.3
 chromadb==0.4.24
