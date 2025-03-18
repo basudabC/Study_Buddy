@@ -1,8 +1,6 @@
 import os
 import streamlit as st
-import pysqlite3
-import sys
-sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+import sqlite3
 from typing import TypedDict, Annotated, Literal
 import PyPDF2
 from PIL import Image
@@ -21,11 +19,19 @@ from openai import RateLimitError
 import tiktoken
 import io
 import logging
-#pytesseract.pytesseract.tesseract_cmd = r'C:/Program Files/Tesseract-OCR/tesseract.exe'
 
 # Set up logging for debug mode
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Verify sqlite3 availability
+try:
+    sqlite3.connect(":memory:").close()
+    logger.debug("SQLite3 is available.")
+except Exception as e:
+    logger.error(f"SQLite3 import failed: {e}")
+    st.error(f"Database module (sqlite3) is not available: {e}")
+    raise
 
 # Token counting function
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
@@ -86,21 +92,30 @@ def extract_images_and_ocr(file_path):
 
 # Save to SQLite database
 def save_to_db(title, content):
-    conn = sqlite3.connect("pdf_content.db")
-    cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS pdfs (title TEXT PRIMARY KEY, content TEXT)")
-    cursor.execute("INSERT OR REPLACE INTO pdfs (title, content) VALUES (?, ?)", (title, content))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect("pdf_content.db")
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS pdfs (title TEXT PRIMARY KEY, content TEXT)")
+        cursor.execute("INSERT OR REPLACE INTO pdfs (title, content) VALUES (?, ?)", (title, content))
+        conn.commit()
+        conn.close()
+        logger.debug(f"Saved PDF content to database: {title}")
+    except Exception as e:
+        logger.error(f"Database save failed: {e}")
+        raise
 
 # Load from SQLite database
 def load_from_db(title):
-    conn = sqlite3.connect("pdf_content.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT content FROM pdfs WHERE title = ?", (title,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    try:
+        conn = sqlite3.connect("pdf_content.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT content FROM pdfs WHERE title = ?", (title,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Database load failed: {e}")
+        return None
 
 # Create vector store with text splitting
 def create_vector_store(markdown_text):
@@ -370,8 +385,8 @@ def main():
                     result = st.session_state.agent.invoke(initial_state)
                     report_response = (
                         f"**Book Answer (from '{st.session_state.pdf_title}'):**\n\n{result['book_answer']}\n\n"
-                        f"**Teacher Answer:**\n\n{result['chatgpt_answer']}\n\n"
-                        f"**Web Search Answer:**\n\n{result['web_answer']}"
+                        f"**ChatGPT Answer:**\n\n{result['chatgpt_answer']}\n\n"
+                        f"**Web Search Answer (via DuckDuckGo):**\n\n{result['web_answer']}"
                     )
                     st.session_state.chat_history.append({"role": "assistant", "content": report_response})
                     with st.chat_message("assistant"):
