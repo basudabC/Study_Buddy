@@ -1,35 +1,39 @@
 import os
 import streamlit as st
-
-# Override sqlite3 with pysqlite3 before importing Chroma
-import pysqlite3
+import sqlite3
 import sys
 sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-
 from typing import TypedDict, Annotated, Literal
 import PyPDF2
+from PIL import Image
+import pytesseract
 from markdownify import markdownify as md
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Chroma
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langgraph.graph import StateGraph, END, START
-from langchain_community.tools.tavily_search import TavilySearchResults
+from duckduckgo_search import DDGS
 import time
-import matplotlib.pyplot as plt
-import networkx as nx
-import io
-import base64
 import random
-import pandas as pd
+import json
+from openai import RateLimitError
 import tiktoken
+import io
+import logging
+#pytesseract.pytesseract.tesseract_cmd = r'C:/Program Files/Tesseract-OCR/tesseract.exe'
 
-# Token counting function using tiktoken
-def count_tokens(text: str, model: str = "gpt-4o-mini") -> int:
+# Set up logging for debug mode
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Token counting function
+def count_tokens(text: str, model: str = "gpt-4o") -> int:
     encoding = tiktoken.encoding_for_model(model)
     return len(encoding.encode(text))
 
 # Trim text to fit within token limit
-def trim_text(text: str, max_tokens: int, model: str = "gpt-4o-mini") -> str:
+def trim_text(text: str, max_tokens: int, model: str = "gpt-4o") -> str:
     encoding = tiktoken.encoding_for_model(model)
     tokens = encoding.encode(text)
     if len(tokens) <= max_tokens:
@@ -37,282 +41,210 @@ def trim_text(text: str, max_tokens: int, model: str = "gpt-4o-mini") -> str:
     trimmed_tokens = tokens[:max_tokens]
     return encoding.decode(trimmed_tokens)
 
-# Step 1: PDF to Markdown Conversion
-def pdf_to_markdown(file_path):
+# Text extraction from PDF
+def extract_text_from_pdf(file_path):
+    combined_text = ""
     with open(file_path, "rb") as file:
         pdf_reader = PyPDF2.PdfReader(file)
         num_pages = len(pdf_reader.pages)
-        raw_text = ""
         for page_num in range(num_pages):
             page = pdf_reader.pages[page_num]
-            raw_text += f"\n\n## Page {page_num + 1}\n\n{page.extract_text()}"
-        markdown_text = md(raw_text)
-    return markdown_text
+            text = page.extract_text() or ""
+            combined_text += f"\n\n## Page {page_num + 1}\n\n{text}"
+    return md(combined_text)
 
+# OCR extraction with enhanced accuracy
+def extract_images_and_ocr(file_path):
+    try:
+        version = pytesseract.get_tesseract_version()
+        logger.debug(f"Tesseract version: {version}")
+        st.info(f"Tesseract version: {version}")
+    except pytesseract.TesseractNotFoundError:
+        st.error("Tesseract not found. Install it (e.g., 'sudo apt-get install tesseract-ocr').")
+        return ""
+    combined_text = ""
+    with open(file_path, "rb") as file:
+        pdf_reader = PyPDF2.PdfReader(file)
+        num_pages = len(pdf_reader.pages)
+        for page_num in range(num_pages):
+            page = pdf_reader.pages[page_num]
+            page_text = page.extract_text() or ""
+            combined_text += f"\n\n## Page {page_num + 1}\n\n{page_text}"
+            if '/XObject' in page['/Resources']:
+                x_objects = page['/Resources']['/XObject'].get_object()
+                for obj in x_objects:
+                    if x_objects[obj]['/Subtype'] == '/Image':
+                        try:
+                            img_data = x_objects[obj].get_data()
+                            img = Image.open(io.BytesIO(img_data))
+                            ocr_text = pytesseract.image_to_string(img, config='--psm 6 --oem 3')
+                            combined_text += f"\n\n### Image Text (Page {page_num + 1})\n\n{ocr_text}"
+                        except Exception as e:
+                            logger.warning(f"Error processing image on page {page_num + 1}: {e}")
+                            st.warning(f"Error processing image on page {page_num + 1}: {e}")
+    return md(combined_text)
+
+# Save to SQLite database
+def save_to_db(title, content):
+    conn = sqlite3.connect("pdf_content.db")
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS pdfs (title TEXT PRIMARY KEY, content TEXT)")
+    cursor.execute("INSERT OR REPLACE INTO pdfs (title, content) VALUES (?, ?)", (title, content))
+    conn.commit()
+    conn.close()
+
+# Load from SQLite database
+def load_from_db(title):
+    conn = sqlite3.connect("pdf_content.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT content FROM pdfs WHERE title = ?", (title,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+# Create vector store with text splitting
 def create_vector_store(markdown_text):
-    embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        api_key=st.session_state.openai_api_key
-    )
-    vector_store = Chroma.from_texts(
-        [markdown_text], embeddings, collection_name="book_content", persist_directory="book_db"
-    )
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = text_splitter.split_text(markdown_text)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    vector_store = Chroma.from_texts(chunks, embeddings, collection_name="book_content", persist_directory="book_db")
     return vector_store
 
-# Step 2: Define Agent State and Tools
+# Agent State
 class AgentState(TypedDict):
     messages: Annotated[list, "List of messages in the conversation"]
-    book_context: Annotated[str, "Context retrieved from the book"]
-    web_context: Annotated[str, "Context retrieved from the web"]
-    book_answer: Annotated[str, "Simplified answer from the book"]
-    full_answer: Annotated[str, "Final friendly and detailed answer"]
-    needs_web_search: Annotated[bool, "Whether web search is needed"]
-    chat_history: Annotated[list, "Full chat history for memory"]
-    current_question: Annotated[str, "Current question for visualization"]
+    book_context: Annotated[str, "Context from the book"]
+    book_answer: Annotated[str, "Answer from the book"]
+    chatgpt_answer: Annotated[str, "Answer from ChatGPT"]
+    web_context: Annotated[str, "Context from the web"]
+    web_answer: Annotated[str, "Answer from web search"]
+    chat_history: Annotated[list, "Full chat history"]
+    current_question: Annotated[str, "Current question"]
 
-# Global tools
-search_tool = TavilySearchResults(max_results=2)  # Reduced to 2 for token efficiency
-
+# Initialize LLM
 def initialize_llm():
-    return ChatOpenAI(
-        model="gpt-4o-mini",  # Switch to "gpt-3.5-turbo" if preferred (16,385 token limit)
-        temperature=0.5,
-        api_key=st.session_state.openai_api_key
-    )
+    return ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=st.session_state.openai_api_key)
 
+# Retrieve book context
 def retrieve_from_book(state: AgentState) -> dict:
     question = state["messages"][-1].content
-    docs = st.session_state.retriever.invoke(question)
+    docs = st.session_state.retriever.similarity_search(question, k=5)
     context = "\n\n".join(doc.page_content for doc in docs)
-    needs_web = not context or len(context.strip()) < 50
-    return {"book_context": context, "needs_web_search": needs_web, "current_question": question}
+    context = trim_text(context, max_tokens=10000)
+    logger.debug(f"Book context retrieved: {context[:100]}...")
+    return {"book_context": context, "current_question": question}
 
-def simplify_book_answer(state: AgentState, llm) -> dict:
-    question = state["messages"][-1].content
+# Generate book answer
+def book_answer(state: AgentState, llm) -> dict:
+    question = state["current_question"]
     context = state["book_context"]
-    # Limit history to last 3 messages, trim if needed
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-3:]])
-    prompt = f"""Here’s the recent chat history:
+    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-2:]])
+    prompt = f"""Based on this chat history:
     {history}
 
-    Answer this question using the Markdown-formatted book content: {question}
+    Answer this question using the book content: {question}
     Context: {context}
-    If the context doesn’t have enough info, say 'Hmm, the book doesn’t tell me much about this!'"""
-    # Trim prompt to 50,000 tokens (leaving room for response)
-    prompt = trim_text(prompt, max_tokens=50000)
-    response = llm.invoke(prompt)
-    simplify_prompt = f"""Take this answer and explain it in a clear, easy-to-understand way—like you're teaching a curious beginner or a young student. Keep all the key information, break it down step by step, and use simple words, relatable examples, and a fun, engaging tone:
-    Answer: {response.content}"""
-    simplify_prompt = trim_text(simplify_prompt, max_tokens=50000)
-    simplified = llm.invoke(simplify_prompt)
-    return {"book_answer": simplified.content}
+    If the context lacks info, say 'The book doesn’t have much on this.' 
+    Use simple, plain English."""
+    prompt = trim_text(prompt, max_tokens=15000)
+    try:
+        response = llm.invoke(prompt)
+        logger.debug(f"Book answer generated: {response.content[:100]}...")
+        return {"book_answer": response.content}
+    except RateLimitError as e:
+        logger.error(f"Rate limit exceeded: {e}")
+        st.error(f"Rate limit exceeded: {e}. Wait a minute and retry.")
+        return {"book_answer": "Oops! Rate limit hit. Try again in a minute!"}
 
+# Generate ChatGPT answer
+def chatgpt_answer(state: AgentState, llm) -> dict:
+    question = state["current_question"]
+    prompt = f"""Answer this question: {question}
+    Make it concise, easy to understand for anyone, and include a simple example. Use plain English."""
+    prompt = trim_text(prompt, max_tokens=15000)
+    try:
+        response = llm.invoke(prompt)
+        logger.debug(f"ChatGPT answer generated: {response.content[:100]}...")
+        return {"chatgpt_answer": response.content}
+    except RateLimitError as e:
+        logger.error(f"Rate limit exceeded: {e}")
+        st.error(f"Rate limit exceeded: {e}. Wait a minute and retry.")
+        return {"chatgpt_answer": "Oops! Rate limit hit. Try again in a minute!"}
+
+# Web search using DuckDuckGo
 def web_search(state: AgentState) -> dict:
     question = state["current_question"]
-    results = search_tool.invoke({"query": f"{question} detailed explanation for beginners"})
-    # Limit each result to 500 characters
-    context = "\n".join(result["content"][:500] for result in results)
-    return {"web_context": context}
+    logger.debug(f"Starting web search for: {question}")
+    try:
+        with DDGS() as ddgs:
+            results = [r["body"] for r in ddgs.text(question, max_results=5)]
+            context = "\n".join(results)
+        logger.debug(f"Web search results: {context[:100]}...")
+        return {"web_context": context}
+    except Exception as e:
+        logger.error(f"Web search failed: {e}")
+        st.error(f"Web search failed: {e}")
+        return {"web_context": "Couldn’t fetch web info due to an error."}
 
-def generate_full_answer(state: AgentState, llm) -> dict:
+# Generate web answer
+def web_answer(state: AgentState, llm) -> dict:
     question = state["current_question"]
-    book_answer = state["book_answer"]
     web_context = state["web_context"]
-    # Limit history to last 3 messages
-    history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state["chat_history"][-3:]])
-    prompt = f"""You’re a friendly teacher who loves making things clear! Here’s the recent chat history:
-    {history}
-
-    Explain this question in a fun, detailed, and beginner-friendly way: {question}.
-    Use the simple book answer and enrich it with web info:
-    Book Answer: {book_answer}
+    prompt = f"""Summarize this web info for: {question}
     Web Info: {web_context}
-    Format the response with proper paragraphs, bullet points for lists, and clear sections.
-    Highlight key terms using HTML <span> tags with these colors:
-    - Important concepts: <span style="color:#FF4500">term</span>
-    - Processes: <span style="color:#1E90FF">term</span>
-    - Examples: <span style="color:#32CD32">term</span>
-    Make it engaging, accurate, and add a 'Basics of this Topic' section at the end!"""
-    # Ensure total prompt is under 120,000 tokens
-    total_tokens = count_tokens(prompt)
-    if total_tokens > 120000:
-        excess = total_tokens - 120000
-        web_context_tokens = count_tokens(web_context)
-        web_context = trim_text(web_context, max_tokens=max(500, web_context_tokens - excess))
-        prompt = f"""You’re a friendly teacher who loves making things clear! Here’s the recent chat history:
-        {history}
+    Make it short, simple, and easy to read, like explaining to a friend."""
+    prompt = trim_text(prompt, max_tokens=15000)
+    try:
+        response = llm.invoke(prompt)
+        logger.debug(f"Web answer generated: {response.content[:100]}...")
+        return {"web_answer": response.content}
+    except RateLimitError as e:
+        logger.error(f"Rate limit exceeded: {e}")
+        st.error(f"Rate limit exceeded: {e}. Wait a minute and retry.")
+        return {"web_answer": "Oops! Rate limit hit. Try again in a minute!"}
 
-        Explain this question in a fun, detailed, and beginner-friendly way: {question}.
-        Use the simple book answer and enrich it with web info:
-        Book Answer: {book_answer}
-        Web Info: {web_context}
-        Format the response with proper paragraphs, bullet points for lists, and clear sections.
-        Highlight key terms using HTML <span> tags with these colors:
-        - Important concepts: <span style="color:#FF4500">term</span>
-        - Processes: <span style="color:#1E90FF">term</span>
-        - Examples: <span style="color:#32CD32">term</span>
-        Make it engaging, accurate, and add a 'Basics of this Topic' section at the end!"""
-    response = llm.invoke(prompt)
-    return {"full_answer": response.content}
-
-def route_after_book(state: AgentState) -> Literal["end", "web_search"]:
-    if state["needs_web_search"]:
-        return "web_search"
-    return "end"
-
-# Step 3: Build the Agent Workflow
+# Build workflow
 def build_workflow(llm):
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve_book", retrieve_from_book)
-    workflow.add_node("simplify_book", lambda state: simplify_book_answer(state, llm))
+    workflow.add_node("generate_book_answer", lambda state: book_answer(state, llm))
+    workflow.add_node("generate_chatgpt_answer", lambda state: chatgpt_answer(state, llm))
     workflow.add_node("web_search", web_search)
-    workflow.add_node("generate_full", lambda state: generate_full_answer(state, llm))
-
+    workflow.add_node("generate_web_answer", lambda state: web_answer(state, llm))
     workflow.add_edge(START, "retrieve_book")
-    workflow.add_edge("retrieve_book", "simplify_book")
-    workflow.add_conditional_edges("simplify_book", route_after_book, {"end": END, "web_search": "web_search"})
-    workflow.add_edge("web_search", "generate_full")
-    workflow.add_edge("generate_full", END)
-
+    workflow.add_edge("retrieve_book", "generate_book_answer")
+    workflow.add_edge("generate_book_answer", "generate_chatgpt_answer")
+    workflow.add_edge("generate_chatgpt_answer", "web_search")
+    workflow.add_edge("web_search", "generate_web_answer")
+    workflow.add_edge("generate_web_answer", END)
     return workflow.compile()
 
-# Enhanced Visualization Function
-def generate_visualization(topic):
-    if topic is None:
-        topic = "Unknown Topic"
-    topic = topic.lower()
+# Session Management
+def save_session(session_id, chat_history):
+    session_data = {"chat_history": chat_history}
+    with open(f"session_{session_id}.json", "w") as f:
+        json.dump(session_data, f)
 
-    if "photosynthesis" in topic:
-        G = nx.DiGraph()
-        G.add_node("Sunlight", pos=(0, 2))
-        G.add_node("Water", pos=(-1, 1))
-        G.add_node("CO2", pos=(1, 1))
-        G.add_node("Plant", pos=(0, 0))
-        G.add_node("Glucose", pos=(-1, -1))
-        G.add_node("Oxygen", pos=(1, -1))
-        G.add_edge("Sunlight", "Plant")
-        G.add_edge("Water", "Plant")
-        G.add_edge("CO2", "Plant")
-        G.add_edge("Plant", "Glucose")
-        G.add_edge("Plant", "Oxygen")
+def load_session(session_id):
+    try:
+        with open(f"session_{session_id}.json", "r") as f:
+            session_data = json.load(f)
+        return session_data["chat_history"]
+    except FileNotFoundError:
+        return []
 
-        plt.figure(figsize=(8, 5))
-        pos = nx.get_node_attributes(G, 'pos')
-        nx.draw(G, pos, with_labels=True, node_color="#90EE90", node_size=3000, font_size=10, font_weight="bold", arrowsize=20)
-        plt.title("Photosynthesis Flowchart")
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", bbox_inches="tight")
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-        plt.close()
-
-        table_data = {
-            "Input": ["Sunlight", "Water", "CO2"],
-            "Output": ["Glucose", "Oxygen", "N/A"]
-        }
-        df = pd.DataFrame(table_data)
-        return img_base64, df
-    elif "deep learning" in topic:
-        G = nx.DiGraph()
-        layers = ["Input Layer", "Hidden Layer 1", "Hidden Layer 2", "Output Layer"]
-        for i, layer in enumerate(layers):
-            G.add_node(layer, pos=(i, 0))
-        for i in range(len(layers) - 1):
-            G.add_edge(layers[i], layers[i + 1])
-
-        plt.figure(figsize=(8, 5))
-        pos = nx.get_node_attributes(G, 'pos')
-        nx.draw(G, pos, with_labels=True, node_color="#87CEEB", node_size=3000, font_size=10, font_weight="bold", arrowsize=20)
-        plt.title("Deep Learning Architecture")
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", bbox_inches="tight")
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-        plt.close()
-
-        table_data = {
-            "Layer": ["Input", "Hidden 1", "Hidden 2", "Output"],
-            "Function": ["Receives data", "Learns patterns", "Refines patterns", "Gives result"]
-        }
-        df = pd.DataFrame(table_data)
-        return img_base64, df
-    else:
-        G = nx.DiGraph()
-        G.add_node(topic.capitalize(), pos=(0, 0))
-        G.add_node("Concept 1", pos=(-1, 1))
-        G.add_node("Concept 2", pos=(1, 1))
-        G.add_edge(topic.capitalize(), "Concept 1")
-        G.add_edge(topic.capitalize(), "Concept 2")
-
-        plt.figure(figsize=(8, 5))
-        pos = nx.get_node_attributes(G, 'pos')
-        nx.draw(G, pos, with_labels=True, node_color="#FFD700", node_size=3000, font_size=10, font_weight="bold", arrowsize=20)
-        plt.title(f"Concept Map for {topic.capitalize()}")
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", bbox_inches="tight")
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-        plt.close()
-        return img_base64, None
-
-# Step 4: Streamlit Study Interface
+# Streamlit Interface
 def main():
     st.markdown("""
         <style>
-        .stApp {
-            background-size: cover;
-            background-position: center;
-            transition: background-image 1s ease-in-out;
-        }
-        .chat-container {
-            max-height: 500px;
-            overflow-y: auto;
-            padding: 10px;
-            border-radius: 10px;
-            background-color: #f9f9f9;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .chat-message {
-            margin: 10px 0;
-            padding: 15px;
-            border-radius: 10px;
-            line-height: 1.5;
-            width: 100%;
-        }
-        .user-message {
-            background-color: #007bff;
-            color: white;
-            margin-left: 20%;
-        }
-        .assistant-message {
-            background-color: #e9ecef;
-            color: black;
-            margin-right: 20%;
-        }
-        .avatar {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            margin-right: 10px;
-            vertical-align: middle;
-        }
-        .user-avatar {
-            margin-left: 10px;
-            margin-right: 0;
-            vertical-align: middle;
-        }
-        .stButton>button {
-            border-radius: 10px;
-            padding: 8px 15px;
-            margin: 5px;
-        }
-        .visualization {
-            margin-top: 20px;
-            text-align: center;
-        }
+        .stApp { background-size: cover; background-position: center; transition: background-image 1s ease-in-out; }
+        .chat-container { max-height: 500px; overflow-y: auto; padding: 10px; border-radius: 10px; background-color: #f9f9f9; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .chat-message { margin: 10px 0; padding: 15px; border-radius: 10px; line-height: 1.5; width: 100%; }
+        .user-message { background-color: #007bff; color: white; margin-left: 20%; }
+        .assistant-message { background-color: #e9ecef; color: black; margin-right: 20%; }
+        .avatar { width: 40px; height: 40px; border-radius: 50%; margin-right: 10px; vertical-align: middle; }
+        .user-avatar { margin-left: 10px; margin-right: 0; vertical-align: middle; }
+        .stButton>button { border-radius: 10px; padding: 8px 15px; margin: 5px; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -324,7 +256,6 @@ def main():
         st.session_state.bg_index = 0
     if "last_update" not in st.session_state:
         st.session_state.last_update = time.time()
-
     current_time = time.time()
     if current_time - st.session_state.last_update > 30:
         st.session_state.bg_index = (st.session_state.bg_index + 1) % len(backgrounds)
@@ -332,8 +263,7 @@ def main():
     st.markdown(f"<style>.stApp {{background-image: url({backgrounds[st.session_state.bg_index]});}}</style>", unsafe_allow_html=True)
 
     st.title("Your Study Buddy 📚")
-    
-    # Initialize session state
+
     if "openai_api_key" not in st.session_state:
         st.session_state.openai_api_key = ""
     if "agent" not in st.session_state:
@@ -344,48 +274,63 @@ def main():
         st.session_state.retriever = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if "pending_web_search" not in st.session_state:
-        st.session_state.pending_web_search = None
     if "current_question" not in st.session_state:
         st.session_state.current_question = None
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = None
+    if "pdf_title" not in st.session_state:
+        st.session_state.pdf_title = None
+    if "web_search_triggered" not in st.session_state:
+        st.session_state.web_search_triggered = False
 
     with st.sidebar:
         st.header("API Key")
-        st.session_state.openai_api_key = st.text_input(
-            "OpenAI API Key",
-            value=st.session_state.openai_api_key,
-            type="password"
-        )
-        st.info("Note: Tavily API Key must be set as an environment variable (TAVILY_API_KEY) in Streamlit Cloud settings.")
+        st.session_state.openai_api_key = st.text_input("OpenAI API Key", value=st.session_state.openai_api_key, type="password")
         
+        st.header("Session Management")
+        session_id_input = st.text_input("Enter Session ID (or leave blank for new session)")
+        if st.button("Load Session") and session_id_input:
+            st.session_state.session_id = session_id_input
+            st.session_state.chat_history = load_session(session_id_input)
+            st.success(f"Loaded session {session_id_input}")
         if not st.session_state.openai_api_key:
-            st.warning("Please enter your OpenAI API key to proceed!")
+            st.warning("Please enter your OpenAI API key!")
             return
         else:
             if st.session_state.llm is None or st.session_state.agent is None:
                 st.session_state.llm = initialize_llm()
                 st.session_state.agent = build_workflow(st.session_state.llm)
 
-    if not os.getenv("TAVILY_API_KEY"):
-        st.error("TAVILY_API_KEY environment variable not found. Please set it in Streamlit Cloud settings.")
-        return
-
-    st.write("Upload a book and chat with me! I’ll explain things with visuals and fun facts!")
+    st.write("Upload a PDF and choose how to extract content (Text or OCR). Ask me anything about it!")
 
     if st.button("Clear Chat"):
         st.session_state.chat_history = []
-        st.session_state.pending_web_search = None
         st.session_state.current_question = None
+        st.session_state.web_search_triggered = False
+        if st.session_state.session_id:
+            save_session(st.session_state.session_id, st.session_state.chat_history)
         st.rerun()
 
     uploaded_file = st.file_uploader("Upload a PDF Book", type=["pdf"])
-    if uploaded_file is not None and st.session_state.retriever is None:
+    extraction_method = st.radio("Choose Extraction Method", ("Text-Based", "OCR-Based"))
+    pdf_title_input = st.text_input("Enter PDF Title (for database storage)")
+
+    if uploaded_file is not None and st.session_state.retriever is None and pdf_title_input:
+        st.session_state.pdf_title = pdf_title_input
         with open("temp_book.pdf", "wb") as f:
             f.write(uploaded_file.getbuffer())
-        markdown_text = pdf_to_markdown("temp_book.pdf")
-        vector_store = create_vector_store(markdown_text)
-        st.session_state.retriever = vector_store.as_retriever(search_kwargs={"k": 5})
-        st.success("Book converted to Markdown and ready to chat!")
+        with st.spinner(f"Extracting and saving content using {extraction_method}..."):
+            if extraction_method == "Text-Based":
+                markdown_text = extract_text_from_pdf("temp_book.pdf")
+            else:
+                markdown_text = extract_images_and_ocr("temp_book.pdf")
+            if markdown_text:
+                save_to_db(st.session_state.pdf_title, markdown_text)
+                vector_store = create_vector_store(markdown_text)
+                st.session_state.retriever = vector_store
+                st.success(f"Book '{st.session_state.pdf_title}' processed with {extraction_method} extraction, saved to DB, and ready to chat!")
+            else:
+                st.error("Failed to process the book.")
         os.remove("temp_book.pdf")
 
     if st.session_state.retriever is not None and st.session_state.agent is not None:
@@ -404,67 +349,49 @@ def main():
         if question:
             st.session_state.current_question = question
             st.session_state.chat_history.append({"role": "user", "content": question})
+            st.session_state.web_search_triggered = False
+            logger.debug(f"User asked: {question}")
             with st.chat_message("user"):
                 st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=user{random.randint(1, 100)}" class="avatar user-avatar"/>', unsafe_allow_html=True)
                 st.markdown(f"<div class='chat-message user-message'>{question}</div>", unsafe_allow_html=True)
 
-            with st.spinner("Checking the book..."):
+            with st.spinner("Getting answers from the book, ChatGPT, and the web..."):
                 initial_state = {
                     "messages": [HumanMessage(content=question)],
                     "book_context": "",
-                    "web_context": "",
                     "book_answer": "",
-                    "full_answer": "",
-                    "needs_web_search": False,
+                    "chatgpt_answer": "",
+                    "web_context": "",
+                    "web_answer": "",
                     "chat_history": st.session_state.chat_history[:-1],
                     "current_question": question
                 }
-                result = st.session_state.agent.invoke(initial_state)
+                try:
+                    result = st.session_state.agent.invoke(initial_state)
+                    report_response = (
+                        f"**Book Answer (from '{st.session_state.pdf_title}'):**\n\n{result['book_answer']}\n\n"
+                        f"**Teacher Answer:**\n\n{result['chatgpt_answer']}\n\n"
+                        f"**Web Search Answer:**\n\n{result['web_answer']}"
+                    )
+                    st.session_state.chat_history.append({"role": "assistant", "content": report_response})
+                    with st.chat_message("assistant"):
+                        st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
+                        st.markdown(f"<div class='chat-message assistant-message'>{report_response}</div>", unsafe_allow_html=True)
+                except Exception as e:
+                    logger.error(f"Error generating answers: {e}")
+                    st.error(f"Error generating answers: {e}")
+                    st.session_state.chat_history.append({"role": "assistant", "content": "Oops! Something went wrong."})
 
-                book_response = f"**From the Book (Simple):** {result['book_answer']}"
-                if result["needs_web_search"]:
-                    book_response += f"\n\n**More Fun Info:** {result['full_answer']}"
-                    img_base64, table_data = generate_visualization(question)
-                    book_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
-                    if table_data is not None:
-                        book_response += "\n\n**Related Data:**"
-                        book_response += f"\n\n{table_data.to_html(index=False, classes='table table-striped')}"
-                st.session_state.chat_history.append({"role": "assistant", "content": book_response})
-                with st.chat_message("assistant"):
-                    st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                    st.markdown(f"<div class='chat-message assistant-message'>{book_response}</div>", unsafe_allow_html=True)
+                if not st.session_state.session_id:
+                    st.session_state.session_id = str(random.randint(1000, 9999))
+                    st.info(f"New session ID: {st.session_state.session_id}")
+                save_session(st.session_state.session_id, st.session_state.chat_history)
 
-                if not result["needs_web_search"]:
-                    st.session_state.pending_web_search = result
-
-        if st.session_state.pending_web_search:
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Want more info from the web?"):
-                    with st.spinner("Searching the web for you..."):
-                        web_state = st.session_state.pending_web_search.copy()
-                        web_state["chat_history"] = st.session_state.chat_history
-                        web_state["web_context"] = web_search(web_state)["web_context"]
-                        full_answer_dict = generate_full_answer(web_state, st.session_state.llm)
-                        full_response = f"**More Fun Info:** {full_answer_dict['full_answer']}"
-                        img_base64, table_data = generate_visualization(st.session_state.current_question)
-                        full_response += f"\n\n<div class='visualization'><img src='data:image/png;base64,{img_base64}' style='max-width:100%;'></div>"
-                        if table_data is not None:
-                            full_response += "\n\n**Related Data:**"
-                            full_response += f"\n\n{table_data.to_html(index=False, classes='table table-striped')}"
-                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-                        with st.chat_message("assistant"):
-                            st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                            st.markdown(f"<div class='chat-message assistant-message'>{full_response}</div>", unsafe_allow_html=True)
-                        st.session_state.pending_web_search = None
-            with col2:
-                if st.button("No, I’m good!"):
-                    st.session_state.pending_web_search = None
     else:
         if st.session_state.retriever is None:
-            st.warning("Please upload a book to start chatting!")
+            st.warning("Please upload a book and provide a title to start chatting!")
         if st.session_state.agent is None:
-            st.warning("Please enter your OpenAI API key to enable the chat functionality!")
+            st.warning("Please enter your OpenAI API key!")
 
 if __name__ == "__main__":
     main()
