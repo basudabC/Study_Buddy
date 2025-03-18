@@ -1,17 +1,12 @@
-langchain==0.3.20
-langchain_community==0.3.19
-langchain_core==0.3.44
-langchain_openai==0.3.8
-langgraph==0.3.8
-chromadb
-markdownify==1.1.0
-matplotlib==3.10.1
-networkx==3.4.2
-pandas==2.2.3
+streamlit==1.36.0
 PyPDF2==3.0.1
-python-dotenv==1.0.1
-streamlit==1.43.2
-pysqlite3-binary
-tiktoken
-pytesseract
-duckduckgo-search
+Pillow==10.4.0
+pytesseract==0.3.10
+markdownify==0.11.6
+langchain-openai==0.1.17
+langchain-community==0.0.38  # Compatible with chromadb 0.4.x
+langchain==0.1.20
+openai==1.35.13
+tiktoken==0.7.0
+duckduckgo-search==6.2.3
+chromadb==0.4.24  # Known to work with langchain-community 0.0.38
