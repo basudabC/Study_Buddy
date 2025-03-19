@@ -1,8 +1,9 @@
 import os
 import streamlit as st
-import sqlite3
 import sys
-#sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+import pysqlite3  # Import pysqlite3 before chromadb
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")  # Swap sqlite3 with pysqlite3
+import sqlite3  # Now sqlite3 is pysqlite3
 from typing import TypedDict, Annotated, Literal
 import PyPDF2
 from PIL import Image
@@ -22,21 +23,27 @@ import tiktoken
 import io
 import logging
 import chromadb
+
 # Set up logging for debug mode
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Log library versions for debugging
 logger.debug(f"chromadb version: {chromadb.__version__}")
+logger.debug(f"sqlite3 version: {sqlite3.sqlite_version}")  # Log the effective SQLite version
 logger.debug(f"langchain_community version: {Chroma.__module__.split('.')[0]}.{Chroma.__module__.split('.')[1]}.__version__ not directly accessible, assuming installed version")
 
-# Verify sqlite3 availability
+# Verify sqlite3 (pysqlite3) availability
 try:
-    sqlite3.connect(":memory:").close()
-    logger.debug("SQLite3 is available.")
+    conn = sqlite3.connect(":memory:")
+    version = sqlite3.sqlite_version
+    conn.close()
+    logger.debug(f"SQLite3 (pysqlite3) is available, version: {version}")
+    if tuple(map(int, version.split('.'))) < (3, 35, 0):
+        raise RuntimeError(f"SQLite version {version} is below required 3.35.0")
 except Exception as e:
-    logger.error(f"SQLite3 import failed: {e}")
-    st.error(f"Database module (sqlite3) is not available: {e}")
+    logger.error(f"SQLite3 (pysqlite3) check failed: {e}")
+    st.error(f"Database module (sqlite3/pysqlite3) issue: {e}")
     raise
 
 # Token counting function
@@ -367,6 +374,8 @@ def main():
                 with st.chat_message(message["role"]):
                     if message["role"] == "user":
                         st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=user{random.randint(1, 100)}" class="avatar user-avatar"/>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
                     CHARACTER_LIMIT = 10000  # Define a reasonable character limit
                     truncated_content = message["content"][:CHARACTER_LIMIT] + "..." if len(message["content"]) > CHARACTER_LIMIT else message["content"]
                     st.markdown(f"<div class='chat-message {message['role']}-message'>{truncated_content}</div>", unsafe_allow_html=True)
