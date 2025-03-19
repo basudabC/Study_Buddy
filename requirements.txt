@@ -11,3 +11,4 @@ openai
 tiktoken
 duckduckgo-search
 chromadb
+pysqlite3-binary
