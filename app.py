@@ -162,7 +162,13 @@ def initialize_llm():
     if not api_key or not isinstance(api_key, str) or api_key.strip() == "":
         logger.error("Invalid or missing OpenAI API key")
         raise ValueError("OpenAI API key is required and must be a non-empty string")
-    return ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=api_key)
+    try:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=api_key)
+        logger.debug(f"ChatOpenAI initialized successfully with model: {llm.model_name}")
+        return llm
+    except Exception as e:
+        logger.error(f"Failed to initialize ChatOpenAI: {str(e)}")
+        raise
 
 # Retrieve book context
 def retrieve_from_book(state: AgentState) -> dict:
@@ -341,8 +347,13 @@ def main():
                 try:
                     st.session_state.llm = initialize_llm()
                     st.session_state.agent = build_workflow(st.session_state.llm)
+                    logger.debug("Agent workflow built successfully")
                 except ValueError as e:
                     st.error(str(e))
+                    return
+                except Exception as e:
+                    st.error(f"Unexpected error during initialization: {str(e)}")
+                    logger.error(f"Initialization error: {str(e)}")
                     return
 
     st.write("Upload a PDF and choose how to extract content (Text or OCR). Ask me anything about it!")
