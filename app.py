@@ -214,7 +214,7 @@ def book_answer(state: AgentState, llm) -> dict:
 def chatgpt_answer(state: AgentState, llm) -> dict:
     question = state["current_question"]
     prompt = f"""Answer this question: {question}
-    Make it concise, easy to understand for anyone, and include a simple example. Use plain English."""
+    Make it concise, easy to understand for anyone, and include simple examples As Like a Teacher. Use plain English."""
     prompt = trim_text(prompt, max_tokens=15000)
     try:
         response = llm.invoke(prompt)
@@ -246,7 +246,7 @@ def web_answer(state: AgentState, llm) -> dict:
     web_context = state["web_context"]
     prompt = f"""Summarize this web info for: {question}
     Web Info: {web_context}
-    Make it short, simple, and easy to read, like explaining to a friend."""
+    Make it Easy, simple, and informative to read, like explaining to a friend."""
     prompt = trim_text(prompt, max_tokens=15000)
     try:
         response = llm.invoke(prompt)
