@@ -1,3 +1,2 @@
 tesseract-ocr
-libtesseract-dev
-libsqlite3-dev  # Added for pysqlite3/chromadb
+
