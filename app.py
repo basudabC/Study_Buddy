@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 # Log library versions for debugging
 logger.debug(f"chromadb version: {chromadb.__version__}")
 logger.debug(f"sqlite3 version: {sqlite3.sqlite_version}")
-logger.debug(f"langchain_community version: {Chroma.__module__.split('.')[0]}.{Chroma.__module__.split('.')[1]}.__version__ not directly accessible, assuming installed version")
 
 # Verify sqlite3 (pysqlite3) availability
 try:
@@ -63,14 +62,19 @@ def trim_text(text: str, max_tokens: int, model: str = "gpt-4o") -> str:
 # Text extraction from PDF
 def extract_text_from_pdf(file_path):
     combined_text = ""
-    with open(file_path, "rb") as file:
-        pdf_reader = PyPDF2.PdfReader(file)
-        num_pages = len(pdf_reader.pages)
-        for page_num in range(num_pages):
-            page = pdf_reader.pages[page_num]
-            text = page.extract_text() or ""
-            combined_text += f"\n\n## Page {page_num + 1}\n\n{text}"
-    return md(combined_text)
+    try:
+        with open(file_path, "rb") as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            num_pages = len(pdf_reader.pages)
+            for page_num in range(num_pages):
+                page = pdf_reader.pages[page_num]
+                text = page.extract_text() or ""
+                combined_text += f"\n\n## Page {page_num + 1}\n\n{text}"
+        return md(combined_text)
+    except Exception as e:
+        logger.error(f"Failed to extract text from PDF: {e}")
+        st.error(f"Error extracting text from PDF: {e}")
+        return ""
 
 # OCR extraction with enhanced accuracy
 def extract_images_and_ocr(file_path):
@@ -79,29 +83,34 @@ def extract_images_and_ocr(file_path):
         logger.debug(f"Tesseract version: {version}")
         st.info(f"Tesseract version: {version}")
     except pytesseract.TesseractNotFoundError:
-        st.error("Tesseract not found. Install it (e.g., 'sudo apt-get install tesseract-ocr').")
+        st.error("Tesseract not found on the server. OCR functionality is unavailable.")
         return ""
     combined_text = ""
-    with open(file_path, "rb") as file:
-        pdf_reader = PyPDF2.PdfReader(file)
-        num_pages = len(pdf_reader.pages)
-        for page_num in range(num_pages):
-            page = pdf_reader.pages[page_num]
-            page_text = page.extract_text() or ""
-            combined_text += f"\n\n## Page {page_num + 1}\n\n{page_text}"
-            if '/XObject' in page['/Resources']:
-                x_objects = page['/Resources']['/XObject'].get_object()
-                for obj in x_objects:
-                    if x_objects[obj]['/Subtype'] == '/Image':
-                        try:
-                            img_data = x_objects[obj].get_data()
-                            img = Image.open(io.BytesIO(img_data))
-                            ocr_text = pytesseract.image_to_string(img, config='--psm 6 --oem 3')
-                            combined_text += f"\n\n### Image Text (Page {page_num + 1})\n\n{ocr_text}"
-                        except Exception as e:
-                            logger.warning(f"Error processing image on page {page_num + 1}: {e}")
-                            st.warning(f"Error processing image on page {page_num + 1}: {e}")
-    return md(combined_text)
+    try:
+        with open(file_path, "rb") as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            num_pages = len(pdf_reader.pages)
+            for page_num in range(num_pages):
+                page = pdf_reader.pages[page_num]
+                page_text = page.extract_text() or ""
+                combined_text += f"\n\n## Page {page_num + 1}\n\n{page_text}"
+                if '/XObject' in page['/Resources']:
+                    x_objects = page['/Resources']['/XObject'].get_object()
+                    for obj in x_objects:
+                        if x_objects[obj]['/Subtype'] == '/Image':
+                            try:
+                                img_data = x_objects[obj].get_data()
+                                img = Image.open(io.BytesIO(img_data))
+                                ocr_text = pytesseract.image_to_string(img, config='--psm 6 --oem 3')
+                                combined_text += f"\n\n### Image Text (Page {page_num + 1})\n\n{ocr_text}"
+                            except Exception as e:
+                                logger.warning(f"Error processing image on page {page_num + 1}: {e}")
+                                st.warning(f"Error processing image on page {page_num + 1}: {e}")
+        return md(combined_text)
+    except Exception as e:
+        logger.error(f"Failed to process PDF with OCR: {e}")
+        st.error(f"Error processing PDF with OCR: {e}")
+        return ""
 
 # Save to SQLite database
 def save_to_db(title, content):
@@ -115,7 +124,7 @@ def save_to_db(title, content):
         logger.debug(f"Saved PDF content to database: {title}")
     except Exception as e:
         logger.error(f"Database save failed: {e}")
-        raise
+        st.error(f"Failed to save to database: {e}")
 
 # Load from SQLite database
 def load_from_db(title):
@@ -128,21 +137,22 @@ def load_from_db(title):
         return result[0] if result else None
     except Exception as e:
         logger.error(f"Database load failed: {e}")
+        st.error(f"Failed to load from database: {e}")
         return None
 
 # Create vector store with text splitting
 def create_vector_store(markdown_text):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = text_splitter.split_text(markdown_text)
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=st.session_state.openai_api_key)
     try:
-        vector_store = Chroma.from_texts(chunks, embeddings, collection_name="book_content", persist_directory="book_db")
-        logger.debug("Vector store created successfully.")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = text_splitter.split_text(markdown_text)
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+        vector_store = Chroma.from_texts(chunks, embeddings, collection_name="book_content", persist_directory="./book_db")
+        logger.debug("Vector store created successfully")
         return vector_store
-    except AttributeError as e:
-        logger.error(f"Chroma initialization failed: {e}")
-        st.error(f"Error initializing Chroma vector store: {e}. Check chromadb version compatibility.")
-        raise
+    except Exception as e:
+        logger.error(f"Failed to create vector store: {e}")
+        st.error(f"Error creating vector store: {e}")
+        return None
 
 # Agent State
 class AgentState(TypedDict):
@@ -158,16 +168,15 @@ class AgentState(TypedDict):
 # Initialize LLM
 def initialize_llm():
     api_key = st.session_state.openai_api_key
-    logger.debug(f"Initializing LLM with API key: {'[REDACTED]' if api_key else 'None'}")
     if not api_key or not isinstance(api_key, str) or api_key.strip() == "":
         logger.error("Invalid or missing OpenAI API key")
         raise ValueError("OpenAI API key is required and must be a non-empty string")
     try:
         llm = ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=api_key)
-        logger.debug(f"ChatOpenAI initialized successfully with model: {llm.model_name}")
+        logger.debug("ChatOpenAI initialized successfully")
         return llm
     except Exception as e:
-        logger.error(f"Failed to initialize ChatOpenAI: {str(e)}")
+        logger.error(f"Failed to initialize ChatOpenAI: {e}")
         raise
 
 # Retrieve book context
@@ -266,9 +275,14 @@ def build_workflow(llm):
 
 # Session Management
 def save_session(session_id, chat_history):
-    session_data = {"chat_history": chat_history}
-    with open(f"session_{session_id}.json", "w") as f:
-        json.dump(session_data, f)
+    try:
+        session_data = {"chat_history": chat_history}
+        with open(f"session_{session_id}.json", "w") as f:
+            json.dump(session_data, f)
+        logger.debug(f"Saved session: {session_id}")
+    except Exception as e:
+        logger.error(f"Failed to save session: {e}")
+        st.error(f"Failed to save session: {e}")
 
 def load_session(session_id):
     try:
@@ -276,6 +290,10 @@ def load_session(session_id):
             session_data = json.load(f)
         return session_data["chat_history"]
     except FileNotFoundError:
+        return []
+    except Exception as e:
+        logger.error(f"Failed to load session: {e}")
+        st.error(f"Failed to load session: {e}")
         return []
 
 # Streamlit Interface
@@ -352,8 +370,8 @@ def main():
                     st.error(str(e))
                     return
                 except Exception as e:
-                    st.error(f"Unexpected error during initialization: {str(e)}")
-                    logger.error(f"Initialization error: {str(e)}")
+                    st.error(f"Failed to initialize agent: {e}")
+                    logger.error(f"Agent initialization error: {e}")
                     return
 
     st.write("Upload a PDF and choose how to extract content (Text or OCR). Ask me anything about it!")
@@ -372,21 +390,31 @@ def main():
 
     if uploaded_file is not None and st.session_state.retriever is None and pdf_title_input:
         st.session_state.pdf_title = pdf_title_input
-        with open("temp_book.pdf", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        with st.spinner(f"Extracting and saving content using {extraction_method}..."):
-            if extraction_method == "Text-Based":
-                markdown_text = extract_text_from_pdf("temp_book.pdf")
-            else:
-                markdown_text = extract_images_and_ocr("temp_book.pdf")
-            if markdown_text:
-                save_to_db(st.session_state.pdf_title, markdown_text)
-                vector_store = create_vector_store(markdown_text)
-                st.session_state.retriever = vector_store
-                st.success(f"Book '{st.session_state.pdf_title}' processed with {extraction_method} extraction, saved to DB, and ready to chat!")
-            else:
-                st.error("Failed to process the book.")
-        os.remove("temp_book.pdf")
+        temp_file_path = os.path.join(os.getcwd(), "temp_book.pdf")
+        try:
+            with open(temp_file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            with st.spinner(f"Extracting and saving content using {extraction_method}..."):
+                if extraction_method == "Text-Based":
+                    markdown_text = extract_text_from_pdf(temp_file_path)
+                else:
+                    markdown_text = extract_images_and_ocr(temp_file_path)
+                if markdown_text:
+                    save_to_db(st.session_state.pdf_title, markdown_text)
+                    vector_store = create_vector_store(markdown_text)
+                    if vector_store:
+                        st.session_state.retriever = vector_store
+                        st.success(f"Book '{st.session_state.pdf_title}' processed with {extraction_method} extraction, saved to DB, and ready to chat!")
+                    else:
+                        st.error("Failed to create vector store.")
+                else:
+                    st.error("Failed to process the book.")
+        except Exception as e:
+            logger.error(f"Error processing uploaded file: {e}")
+            st.error(f"Error processing file: {e}")
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
 
     if st.session_state.retriever is not None and st.session_state.agent is not None:
         with st.container():
@@ -397,9 +425,7 @@ def main():
                         st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=user{random.randint(1, 100)}" class="avatar user-avatar"/>', unsafe_allow_html=True)
                     else:
                         st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                    CHARACTER_LIMIT = 10000
-                    truncated_content = message["content"][:CHARACTER_LIMIT] + "..." if len(message["content"]) > CHARACTER_LIMIT else message["content"]
-                    st.markdown(f"<div class='chat-message {message['role']}-message'>{truncated_content}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='chat-message {message['role']}-message'>{message['content']}</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
         question = st.chat_input("Ask me anything about the book!")
@@ -427,8 +453,8 @@ def main():
                     result = st.session_state.agent.invoke(initial_state)
                     report_response = (
                         f"**Book Answer (from '{st.session_state.pdf_title}'):**\n\n{result['book_answer']}\n\n"
-                        f"**ChatGPT Answer:**\n\n{result['chatgpt_answer']}\n\n"
-                        f"**Web Search Answer (via DuckDuckGo):**\n\n{result['web_answer']}"
+                        f"**Teacher Answer:**\n\n{result['chatgpt_answer']}\n\n"
+                        f"**Web Search Answer:**\n\n{result['web_answer']}"
                     )
                     st.session_state.chat_history.append({"role": "assistant", "content": report_response})
                     with st.chat_message("assistant"):
