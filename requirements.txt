@@ -5,10 +5,10 @@ PyPDF2==3.0.1
 Pillow==10.4.0
 pytesseract==0.3.10
 markdownify==0.11.6
-langchain-openai==0.1.17
+langchain-openai==0.1.25
 langchain-community==0.2.16
 langchain==0.2.16
-openai==1.34.0  # Downgrade from 1.35.13 to avoid proxies issue
+openai==1.35.13
 tiktoken==0.7.0
 duckduckgo-search==6.2.3
 chromadb==0.4.24
