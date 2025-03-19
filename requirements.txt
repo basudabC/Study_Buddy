@@ -1,13 +1,13 @@
-streamlit==1.36.0
-pysqlite3-binary>=0.4.7.post8  # Keep for SQLite >= 3.35.0
-PyPDF2==3.0.1
-Pillow==10.4.0
-pytesseract==0.3.10
-markdownify==0.11.6
-langchain-openai==0.1.25
-langchain-community==0.2.16
-langchain==0.2.16
-openai==1.35.13
-tiktoken==0.7.0
-duckduckgo-search==6.2.3
-chromadb==0.5.3  # Updated from 0.4.24 to ensure compatibility
+streamlit
+pysqlite3-binary
+PyPDF2
+Pillow
+pytesseract
+markdownify
+langchain-openai
+langchain-community
+langchain
+openai
+tiktoken
+duckduckgo-search
+chromadb
