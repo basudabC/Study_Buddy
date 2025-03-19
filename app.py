@@ -21,7 +21,6 @@ from openai import RateLimitError
 import tiktoken
 import io
 import logging
-import chromadb
 
 # Set up logging for debug mode
 logging.basicConfig(level=logging.DEBUG)
