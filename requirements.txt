@@ -6,6 +6,7 @@ markdownify==0.11.6
 langchain-openai
 langchain-community
 langchain
+langgraph
 openai
 tiktoken==0.7.0
 duckduckgo-search==6.2.3
