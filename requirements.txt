@@ -1,5 +1,5 @@
 streamlit==1.36.0
-pysqlite3-binary==0.4.7  # Provides SQLite >= 3.35.0
+pysqlite3-binary
 PyPDF2==3.0.1
 Pillow==10.4.0
 pytesseract==0.3.10
