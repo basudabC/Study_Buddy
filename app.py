@@ -1,9 +1,9 @@
 import os
 import streamlit as st
 import sys
-import pysqlite3  # Import pysqlite3 before chromadb
-sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")  # Swap sqlite3 with pysqlite3
-import sqlite3  # Now sqlite3 is pysqlite3
+import pysqlite3
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+import sqlite3
 from typing import TypedDict, Annotated, Literal
 import PyPDF2
 from PIL import Image
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Log library versions for debugging
 logger.debug(f"chromadb version: {chromadb.__version__}")
-logger.debug(f"sqlite3 version: {sqlite3.sqlite_version}")  # Log the effective SQLite version
+logger.debug(f"sqlite3 version: {sqlite3.sqlite_version}")
 logger.debug(f"langchain_community version: {Chroma.__module__.split('.')[0]}.{Chroma.__module__.split('.')[1]}.__version__ not directly accessible, assuming installed version")
 
 # Verify sqlite3 (pysqlite3) availability
@@ -157,7 +157,12 @@ class AgentState(TypedDict):
 
 # Initialize LLM
 def initialize_llm():
-    return ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=st.session_state.openai_api_key)
+    api_key = st.session_state.openai_api_key
+    logger.debug(f"Initializing LLM with API key: {'[REDACTED]' if api_key else 'None'}")
+    if not api_key or not isinstance(api_key, str) or api_key.strip() == "":
+        logger.error("Invalid or missing OpenAI API key")
+        raise ValueError("OpenAI API key is required and must be a non-empty string")
+    return ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=api_key)
 
 # Retrieve book context
 def retrieve_from_book(state: AgentState) -> dict:
@@ -327,13 +332,18 @@ def main():
             st.session_state.session_id = session_id_input
             st.session_state.chat_history = load_session(session_id_input)
             st.success(f"Loaded session {session_id_input}")
+        
         if not st.session_state.openai_api_key:
             st.warning("Please enter your OpenAI API key!")
             return
         else:
             if st.session_state.llm is None or st.session_state.agent is None:
-                st.session_state.llm = initialize_llm()
-                st.session_state.agent = build_workflow(st.session_state.llm)
+                try:
+                    st.session_state.llm = initialize_llm()
+                    st.session_state.agent = build_workflow(st.session_state.llm)
+                except ValueError as e:
+                    st.error(str(e))
+                    return
 
     st.write("Upload a PDF and choose how to extract content (Text or OCR). Ask me anything about it!")
 
@@ -376,7 +386,7 @@ def main():
                         st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=user{random.randint(1, 100)}" class="avatar user-avatar"/>', unsafe_allow_html=True)
                     else:
                         st.markdown(f'<img src="https://api.dicebear.com/9.x/pixel-art/svg?seed=bot{random.randint(1, 100)}" class="avatar"/>', unsafe_allow_html=True)
-                    CHARACTER_LIMIT = 10000  # Define a reasonable character limit
+                    CHARACTER_LIMIT = 10000
                     truncated_content = message["content"][:CHARACTER_LIMIT] + "..." if len(message["content"]) > CHARACTER_LIMIT else message["content"]
                     st.markdown(f"<div class='chat-message {message['role']}-message'>{truncated_content}</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
@@ -426,8 +436,8 @@ def main():
     else:
         if st.session_state.retriever is None:
             st.warning("Please upload a book and provide a title to start chatting!")
-        if st.session_state.agent is None:
-            st.warning("Please enter your OpenAI API key!")
+        if st.session_state.agent is None and st.session_state.openai_api_key:
+            st.warning("Failed to initialize the agent. Please check your API key and try again.")
 
 if __name__ == "__main__":
     main()
